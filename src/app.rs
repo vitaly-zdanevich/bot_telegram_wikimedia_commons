@@ -18,8 +18,11 @@ use crate::wikidata::WikidataClient;
 use anyhow::{Context, Result};
 use lambda_http::{Body, Request, Response};
 use serde_json::json;
+use std::time::Duration;
+use tokio::time::timeout;
 
 const PAGINATED_RESULT_LIMIT: usize = BUTTON_PAGE_SIZE * 3;
+const INLINE_QUERY_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// Handles one AWS Lambda HTTP request from Telegram.
 pub async fn handle_lambda_request(request: Request) -> Result<Response<Body>> {
@@ -270,38 +273,86 @@ pub async fn handle_update(update: Update, config: &Config) -> Result<()> {
     }
 
     if let Some(inline_query) = update.inline_query {
-        let prefs = preferences.get(inline_query.from.id).await;
+        let query_id = inline_query.id;
+        let query_text = inline_query.query;
+        let user_id = inline_query.from.id;
         let location = inline_query.location;
-        let mut parsed = match parse_intent(&inline_query.query) {
-            Intent::FileSearch(query) => query,
-            _ => Default::default(),
+        let inline_result = timeout(INLINE_QUERY_TIMEOUT, async {
+            let prefs = preferences.get(user_id).await;
+            let mut parsed = match parse_intent(&query_text) {
+                Intent::FileSearch(query) => query,
+                _ => Default::default(),
+            };
+            if parsed.file_type.is_none() {
+                parsed.file_type = Some(FileType::Images);
+            }
+            let use_location = location.is_some() && inline_location_applies(&parsed);
+            let files = if let (Some(location), true) = (location, use_location) {
+                commons
+                    .search_nearby_files(
+                        location.latitude,
+                        location.longitude,
+                        &parsed,
+                        &prefs,
+                        20,
+                        config.max_file_bytes,
+                    )
+                    .await?
+            } else {
+                commons
+                    .search_files(&parsed, &prefs, 20, config.max_file_bytes)
+                    .await?
+            };
+            Ok::<_, anyhow::Error>((files, use_location))
+        })
+        .await;
+
+        let (files, use_location) = match inline_result {
+            Ok(result) => result?,
+            Err(_) => {
+                tracing::warn!(
+                    query = %query_text,
+                    timeout_ms = INLINE_QUERY_TIMEOUT.as_millis(),
+                    "inline search timed out before Telegram deadline"
+                );
+                (Vec::new(), false)
+            }
         };
-        if parsed.file_type.is_none() {
-            parsed.file_type = Some(FileType::Images);
-        }
-        let use_location = location.is_some() && inline_location_applies(&parsed);
-        let files = if let (Some(location), true) = (location, use_location) {
-            commons
-                .search_nearby_files(
-                    location.latitude,
-                    location.longitude,
-                    &parsed,
-                    &prefs,
-                    20,
-                    config.max_file_bytes,
-                )
-                .await?
-        } else {
-            commons
-                .search_files(&parsed, &prefs, 20, config.max_file_bytes)
-                .await?
-        };
-        telegram
-            .answer_inline_query(&inline_query.id, &files, use_location)
-            .await?;
+        answer_inline_query_safely(&telegram, &query_id, &files, use_location).await?;
     }
 
     Ok(())
+}
+
+/// Answers an inline query while ignoring Telegram's stale-query rejection.
+async fn answer_inline_query_safely(
+    telegram: &TelegramClient,
+    query_id: &str,
+    files: &[crate::models::FileHit],
+    is_personal: bool,
+) -> Result<()> {
+    match telegram
+        .answer_inline_query(query_id, files, is_personal)
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(error) if is_expired_inline_query_error(&error) => {
+            tracing::warn!(
+                error = %format!("{error:#}"),
+                "Telegram rejected an expired inline query"
+            );
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Detects Telegram's expected error for inline query IDs that are already stale.
+fn is_expired_inline_query_error(error: &anyhow::Error) -> bool {
+    let message = format!("{error:#}");
+    message.contains("query is too old")
+        || message.contains("response timeout expired")
+        || message.contains("query ID is invalid")
 }
 
 /// Returns true when inline location should rank results by nearby coordinates.
@@ -1022,8 +1073,9 @@ fn yes_no(value: bool) -> &'static str {
 mod tests {
     use super::{
         ExtensionGroup, PreferencesView, apply_preference_callback, category_result_limit,
-        file_result_limit, help_text, inline_location_applies, is_preferences_update_command,
-        parse_pagination_callback, preferences_keyboard, update_preferences,
+        file_result_limit, help_text, inline_location_applies, is_expired_inline_query_error,
+        is_preferences_update_command, parse_pagination_callback, preferences_keyboard,
+        update_preferences,
     };
     use crate::config::Config;
     use crate::models::{DeliveryMode, FileType, Preferences, SearchQuery, SizeFilter, SizeOp};
@@ -1100,6 +1152,18 @@ mod tests {
             file_type: Some(FileType::Audio),
             ..SearchQuery::default()
         }));
+    }
+
+    #[test]
+    fn detects_expired_inline_query_errors() {
+        let error = anyhow::anyhow!(
+            "Telegram method answerInlineQuery failed with HTTP 400 Bad Request: query is too old and response timeout expired or query ID is invalid"
+        );
+
+        assert!(is_expired_inline_query_error(&error));
+        assert!(!is_expired_inline_query_error(&anyhow::anyhow!(
+            "Telegram method answerInlineQuery failed with HTTP 500"
+        )));
     }
 
     #[test]

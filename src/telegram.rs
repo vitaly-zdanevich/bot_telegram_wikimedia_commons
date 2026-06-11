@@ -460,12 +460,13 @@ impl TelegramClient {
             .take(20)
             .filter_map(inline_result)
             .collect::<Vec<_>>();
+        let cache_time = if results.is_empty() { 1 } else { 60 };
         self.post_json(
             "answerInlineQuery",
             &serde_json::json!({
                 "inline_query_id": query_id,
                 "results": results,
-                "cache_time": 60,
+                "cache_time": cache_time,
                 "is_personal": is_personal
             }),
         )
