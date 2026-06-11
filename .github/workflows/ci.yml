@@ -123,6 +123,8 @@ jobs:
         if: ${{ env.SONAR_TOKEN != '' }}
       - run: cargo install cargo-llvm-cov
         if: ${{ env.SONAR_TOKEN != '' }}
+      - run: mkdir -p coverage
+        if: ${{ env.SONAR_TOKEN != '' }}
       - run: cargo llvm-cov --all-features --workspace --lcov --output-path coverage/lcov.info
         if: ${{ env.SONAR_TOKEN != '' }}
       - uses: SonarSource/sonarqube-scan-action@v6
