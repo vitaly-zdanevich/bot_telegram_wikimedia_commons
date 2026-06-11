@@ -324,6 +324,7 @@ fn render_wikidata_claims_html(claims: &WikidataClaims, limit: usize) -> String 
     lines.join("\n")
 }
 
+/// Renders one Wikidata snak value as Telegram-safe HTML.
 fn render_wikidata_snak_value(
     property_id: &str,
     snak: &WikidataSnak,
@@ -380,6 +381,7 @@ fn render_wikidata_snak_value(
     )))
 }
 
+/// Renders a Wikidata globe-coordinate value as an OpenStreetMap link.
 fn wikidata_coordinate_value(value: &serde_json::Map<String, Value>) -> Option<String> {
     let lat = value.get("latitude")?.as_f64()?;
     let lon = value.get("longitude")?.as_f64()?;
@@ -389,6 +391,7 @@ fn wikidata_coordinate_value(value: &serde_json::Map<String, Value>) -> Option<S
     ))
 }
 
+/// Renders a Wikidata time value with unknown month/day components removed.
 fn wikidata_time_value(value: &serde_json::Map<String, Value>) -> Option<String> {
     let raw = value.get("time")?.as_str()?;
     let mut formatted = raw.trim_start_matches('+').to_string();
@@ -401,6 +404,7 @@ fn wikidata_time_value(value: &serde_json::Map<String, Value>) -> Option<String>
     (!formatted.is_empty()).then(|| html_escape_text(&formatted))
 }
 
+/// Renders a Wikidata quantity value and links its unit when possible.
 fn wikidata_quantity_value(
     value: &serde_json::Map<String, Value>,
     labels: &HashMap<String, WikidataLabelInfo>,
@@ -419,6 +423,7 @@ fn wikidata_quantity_value(
     Some(format!("{} {}", html_escape_text(amount), unit))
 }
 
+/// Renders a Wikidata monolingual text value with its language code.
 fn wikidata_monolingual_text_value(value: &serde_json::Map<String, Value>) -> Option<String> {
     let text = value.get("text")?.as_str()?;
     let language = value.get("language").and_then(Value::as_str);
@@ -432,6 +437,7 @@ fn wikidata_monolingual_text_value(value: &serde_json::Map<String, Value>) -> Op
     })
 }
 
+/// Builds a formatter URL for a Wikidata external-id value.
 fn wikidata_external_id_url(formatter: &str, value: &str) -> Option<String> {
     let formatter = formatter.trim();
     let value = value.trim();
@@ -443,6 +449,7 @@ fn wikidata_external_id_url(formatter: &str, value: &str) -> Option<String> {
     is_absolute_url(&url).then_some(url)
 }
 
+/// Renders a Wikidata entity link with a localized label when available.
 fn wikidata_entity_link(entity_id: &str, labels: &HashMap<String, WikidataLabelInfo>) -> String {
     let text = wikidata_label_text(labels, entity_id)
         .filter(|label| label != entity_id)
@@ -451,6 +458,7 @@ fn wikidata_entity_link(entity_id: &str, labels: &HashMap<String, WikidataLabelI
     html_link(&wikidata_entity_url(entity_id), &text)
 }
 
+/// Returns the best loaded label text for a Wikidata entity id.
 fn wikidata_label_text(
     labels: &HashMap<String, WikidataLabelInfo>,
     entity_id: &str,
@@ -458,6 +466,7 @@ fn wikidata_label_text(
     labels.get(entity_id).and_then(|label| label.label.clone())
 }
 
+/// Returns the best loaded description text for a Wikidata entity id.
 fn wikidata_description_text(
     labels: &HashMap<String, WikidataLabelInfo>,
     entity_id: &str,
@@ -467,12 +476,14 @@ fn wikidata_description_text(
         .and_then(|label| label.description.clone())
 }
 
+/// Extracts a normalized Wikidata entity id from a snak datavalue.
 fn wikidata_entity_id_from_snak(snak: &WikidataSnak) -> Option<String> {
     snak.datavalue
         .as_ref()
         .and_then(|datavalue| wikidata_entity_id_from_value(&datavalue.value))
 }
 
+/// Extracts a normalized Wikidata entity id from a raw datavalue.
 fn wikidata_entity_id_from_value(value: &Value) -> Option<String> {
     if let Some(id) = value
         .get("id")
@@ -491,6 +502,7 @@ fn wikidata_entity_id_from_value(value: &Value) -> Option<String> {
     }
 }
 
+/// Extracts a Wikidata entity id from a quantity unit URL.
 fn wikidata_quantity_unit_id(value: &Value) -> Option<String> {
     value
         .get("unit")
@@ -498,12 +510,14 @@ fn wikidata_quantity_unit_id(value: &Value) -> Option<String> {
         .and_then(wikidata_entity_id_from_url)
 }
 
+/// Extracts a normalized Wikidata entity id from the final URL path segment.
 fn wikidata_entity_id_from_url(url: &str) -> Option<String> {
     url.rsplit('/')
         .next()
         .and_then(normalize_wikidata_entity_id)
 }
 
+/// Chooses a localized Wikidata label or description with English fallback.
 fn wikidata_localized_entity_value(
     values: Option<&HashMap<String, WikidataLocalizedValue>>,
     language: &str,
@@ -516,6 +530,7 @@ fn wikidata_localized_entity_value(
         .map(|value| value.value.clone())
 }
 
+/// Normalizes supported Wikidata entity identifiers to uppercase prefixes.
 fn normalize_wikidata_entity_id(value: &str) -> Option<String> {
     let value = value.trim();
     let mut chars = value.chars();
@@ -528,6 +543,7 @@ fn normalize_wikidata_entity_id(value: &str) -> Option<String> {
         .then(|| format!("{prefix}{rest}"))
 }
 
+/// Normalizes a user-supplied language code for Wikidata requests.
 fn normalize_language_code(value: &str) -> String {
     let lower = value.trim().to_ascii_lowercase();
     if lower
@@ -541,6 +557,7 @@ fn normalize_language_code(value: &str) -> String {
     }
 }
 
+/// Returns the canonical Wikidata URL for an item, property, or lexeme id.
 fn wikidata_entity_url(entity_id: &str) -> String {
     if entity_id.starts_with('P') {
         format!("https://www.wikidata.org/wiki/Property:{entity_id}")
@@ -549,6 +566,7 @@ fn wikidata_entity_url(entity_id: &str) -> String {
     }
 }
 
+/// Returns the Commons description page URL for a commonsMedia value.
 fn commons_file_url(file: &str) -> String {
     let file = file.trim();
     let title = if file.to_ascii_lowercase().starts_with("file:") {
@@ -562,18 +580,22 @@ fn commons_file_url(file: &str) -> String {
     )
 }
 
+/// Returns an OpenStreetMap URL for a coordinate pair.
 fn coordinate_url(lat: f64, lon: f64) -> String {
     format!("https://www.openstreetmap.org/?mlat={lat}&mlon={lon}#map=15/{lat}/{lon}")
 }
 
+/// Returns true when a URL is safe to emit as an absolute HTTP(S) link.
 fn is_absolute_url(value: &str) -> bool {
     value.starts_with("https://") || value.starts_with("http://")
 }
 
+/// Renders a bold HTML anchor for Telegram messages.
 fn html_bold_link(url: &str, text: &str) -> String {
     format!("<b>{}</b>", html_link(url, text))
 }
 
+/// Renders an escaped HTML anchor for Telegram messages.
 fn html_link(url: &str, text: &str) -> String {
     format!(
         "<a href=\"{}\">{}</a>",
@@ -582,14 +604,17 @@ fn html_link(url: &str, text: &str) -> String {
     )
 }
 
+/// Escapes visible HTML text for Telegram parse mode.
 fn html_escape_text(value: &str) -> String {
     html_escape::encode_text(value).to_string()
 }
 
+/// Escapes an HTML attribute value for Telegram parse mode.
 fn html_escape_attr(value: &str) -> String {
     html_escape::encode_double_quoted_attribute(value).to_string()
 }
 
+/// Truncates a string to a Telegram-safe character budget.
 fn truncate_for_telegram(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         return value.to_string();
@@ -600,6 +625,7 @@ fn truncate_for_telegram(value: &str, max_chars: usize) -> String {
     truncated
 }
 
+/// Extracts an external-id formatter URL from a Wikidata property entity.
 fn wikidata_formatter_url_from_entity(entity: &WikidataEntity) -> Option<String> {
     entity
         .claims
