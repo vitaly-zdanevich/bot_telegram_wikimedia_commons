@@ -19,6 +19,8 @@ const TELEGRAM_PHOTO_CAPTION_LIMIT_CHARS: usize = 1024;
 /// Telegram update subset handled by this bot.
 #[derive(Clone, Debug, Deserialize)]
 pub struct Update {
+    /// Monotonic Telegram update id used to suppress webhook retries.
+    pub update_id: Option<i64>,
     /// Incoming message.
     pub message: Option<Message>,
     /// Callback query from inline keyboard.
@@ -1288,6 +1290,7 @@ mod tests {
 
         let inline_query = update.inline_query.unwrap();
         let location = inline_query.location.unwrap();
+        assert_eq!(update.update_id, Some(1));
         assert_eq!(inline_query.query, "Minsk");
         assert_eq!(inline_query.offset, "50");
         assert_eq!(location.latitude, 53.9023);

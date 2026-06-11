@@ -126,6 +126,11 @@ resource "aws_dynamodb_table" "preferences" {
   point_in_time_recovery {
     enabled = false
   }
+
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
 }
 
 resource "aws_lambda_function" "bot" {

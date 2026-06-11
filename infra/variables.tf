@@ -84,11 +84,11 @@ variable "commons_auth_cookie_ssm_parameter" {
 variable "dynamodb_read_capacity" {
   type        = number
   description = "Provisioned DynamoDB RCUs. Keep low to stay in free tier."
-  default     = 1
+  default     = 5
 }
 
 variable "dynamodb_write_capacity" {
   type        = number
   description = "Provisioned DynamoDB WCUs. Keep low to stay in free tier."
-  default     = 1
+  default     = 5
 }

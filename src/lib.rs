@@ -5,6 +5,7 @@ pub mod aws;
 pub mod commons;
 pub mod commons_cache;
 pub mod config;
+pub mod idempotency;
 pub mod models;
 pub mod pagination;
 pub mod parser;

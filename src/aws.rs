@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use hmac::{Hmac, Mac};
 use reqwest::Client;
 use serde_json::Value;
@@ -121,12 +121,13 @@ impl AwsJsonClient {
             request = request.header("x-amz-security-token", token);
         }
 
-        Ok(request
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<Value>()
-            .await?)
+        let response = request.send().await?;
+        let status = response.status();
+        let text = response.text().await?;
+        if !status.is_success() {
+            bail!("AWS {service} {target} failed with HTTP {status}: {text}");
+        }
+        Ok(serde_json::from_str(&text)?)
     }
 
     /// Sends a signed AWS Query-protocol POST and returns the raw XML body.

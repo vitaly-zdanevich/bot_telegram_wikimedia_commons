@@ -1,5 +1,6 @@
 use crate::commons::CommonsClient;
 use crate::config::Config;
+use crate::idempotency::IdempotencyStore;
 use crate::models::{
     COMMONS_AUDIO_EXTENSIONS, COMMONS_DOCUMENT_EXTENSIONS, COMMONS_IMAGE_EXTENSIONS,
     COMMONS_MODEL_EXTENSIONS, COMMONS_VIDEO_EXTENSIONS, DEFAULT_INLINE_RESULT_COUNT, DeliveryMode,
@@ -25,6 +26,8 @@ use tokio::time::timeout;
 const PAGINATED_RESULT_LIMIT: usize = BUTTON_PAGE_SIZE * 3;
 const INLINE_QUERY_TIMEOUT: Duration = Duration::from_secs(6);
 const INLINE_MAX_LOOKUP_RESULTS: usize = 151;
+const UPDATE_IDEMPOTENCY_SECONDS: i64 = 24 * 60 * 60;
+const CALLBACK_ACTION_IDEMPOTENCY_SECONDS: i64 = 30;
 
 /// Handles one AWS Lambda HTTP request from Telegram.
 pub async fn handle_lambda_request(request: Request) -> Result<Response<Body>> {
@@ -34,10 +37,114 @@ pub async fn handle_lambda_request(request: Request) -> Result<Response<Body>> {
         return handle_test_endpoint(&request);
     }
     let update: Update = serde_json::from_slice(request.body().as_ref())?;
+    log_telegram_update(&update);
+    let idempotency = IdempotencyStore::new(&config);
+    let keys = idempotency_keys(&update);
+    for key in &keys {
+        match idempotency.reserve(&key.key, key.retention_seconds).await {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::info!(
+                    idempotency_key = %key.key,
+                    "skipping duplicate Telegram update"
+                );
+                return ok_response();
+            }
+            Err(error) => tracing::warn!(
+                idempotency_key = %key.key,
+                error = %format!("{error:#}"),
+                "failed to reserve Telegram update idempotency key"
+            ),
+        }
+    }
     handle_update(update, &config).await?;
+    for key in &keys {
+        if let Err(error) = idempotency.mark_done(&key.key, key.retention_seconds).await {
+            tracing::warn!(
+                idempotency_key = %key.key,
+                error = %format!("{error:#}"),
+                "failed to mark Telegram update idempotency key as done"
+            );
+        }
+    }
+    ok_response()
+}
+
+/// Returns the standard Telegram webhook success response.
+fn ok_response() -> Result<Response<Body>> {
     Ok(Response::builder()
         .status(200)
         .body(Body::Text("ok".into()))?)
+}
+
+/// One idempotency reservation key for a Telegram update.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct IdempotencyKey {
+    /// DynamoDB/RAM key.
+    key: String,
+    /// How long duplicates should be suppressed.
+    retention_seconds: i64,
+}
+
+/// Returns idempotency keys that suppress webhook retries and rapid file-button double clicks.
+fn idempotency_keys(update: &Update) -> Vec<IdempotencyKey> {
+    let mut keys = Vec::new();
+    if let Some(update_id) = update.update_id {
+        keys.push(IdempotencyKey {
+            key: format!("TELEGRAM_UPDATE#{update_id}"),
+            retention_seconds: UPDATE_IDEMPOTENCY_SECONDS,
+        });
+    }
+    if let Some(callback) = &update.callback_query
+        && let (Some(data), Some(message)) = (callback.data.as_deref(), callback.message.as_ref())
+        && matches!(data.split_once(':'), Some(("file" | "cat", _)))
+    {
+        let message_id = message
+            .message_id
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".into());
+        keys.push(IdempotencyKey {
+            key: format!(
+                "TELEGRAM_CALLBACK_ACTION#{}#{}#{}#{}",
+                callback.from.id, message.chat.id, message_id, data
+            ),
+            retention_seconds: CALLBACK_ACTION_IDEMPOTENCY_SECONDS,
+        });
+    }
+    keys
+}
+
+/// Logs the Telegram identifiers needed to debug retries and duplicate replies.
+fn log_telegram_update(update: &Update) {
+    let kind = if update.callback_query.is_some() {
+        "callback_query"
+    } else if update.inline_query.is_some() {
+        "inline_query"
+    } else if update.message.is_some() {
+        "message"
+    } else {
+        "unknown"
+    };
+    tracing::info!(
+        update_id = ?update.update_id,
+        update_kind = kind,
+        callback_query_id = update
+            .callback_query
+            .as_ref()
+            .map(|callback| callback.id.as_str())
+            .unwrap_or_default(),
+        callback_data = update
+            .callback_query
+            .as_ref()
+            .and_then(|callback| callback.data.as_deref())
+            .unwrap_or_default(),
+        inline_query_id = update
+            .inline_query
+            .as_ref()
+            .map(|query| query.id.as_str())
+            .unwrap_or_default(),
+        "received Telegram update"
+    );
 }
 
 /// Handles the authenticated live-test endpoint without sending Telegram messages.
@@ -1154,7 +1261,7 @@ mod tests {
     use super::{
         ExtensionGroup, PreferencesView, apply_preference_callback, category_result_limit,
         checked_label, extension_group_for, file_result_limit, format_preferences, help_text,
-        inline_location_applies, inline_lookup_limit, inline_result_page,
+        idempotency_keys, inline_location_applies, inline_lookup_limit, inline_result_page,
         is_expired_inline_query_error, is_preferences_update_command, parse_inline_offset,
         parse_pagination_callback, preferences_keyboard, toggle_label, update_preferences,
     };
@@ -1163,6 +1270,7 @@ mod tests {
         DeliveryMode, DocumentPageMode, FileHit, FileType, Preferences, SearchQuery, SizeFilter,
         SizeOp,
     };
+    use crate::telegram::{CallbackQuery, Chat, Message, Update, User};
 
     fn test_config(stateless_mode: bool) -> Config {
         Config {
@@ -1265,6 +1373,57 @@ mod tests {
         assert!(is_preferences_update_command("/settings mode links10"));
         assert!(is_preferences_update_command("/prefs mode links10"));
         assert!(!is_preferences_update_command("/settings"));
+    }
+
+    #[test]
+    fn builds_idempotency_keys_for_file_callbacks() {
+        let update = Update {
+            update_id: Some(123),
+            message: None,
+            callback_query: Some(CallbackQuery {
+                id: "callback-id".into(),
+                from: User { id: 42 },
+                message: Some(Message {
+                    message_id: Some(7),
+                    chat: Chat { id: -100 },
+                    from: None,
+                    text: None,
+                }),
+                data: Some("file:99".into()),
+            }),
+            inline_query: None,
+        };
+
+        let keys = idempotency_keys(&update);
+
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0].key, "TELEGRAM_UPDATE#123");
+        assert_eq!(keys[1].key, "TELEGRAM_CALLBACK_ACTION#42#-100#7#file:99");
+    }
+
+    #[test]
+    fn skips_action_idempotency_for_non_file_callbacks() {
+        let update = Update {
+            update_id: Some(124),
+            message: None,
+            callback_query: Some(CallbackQuery {
+                id: "callback-id".into(),
+                from: User { id: 42 },
+                message: Some(Message {
+                    message_id: Some(7),
+                    chat: Chat { id: -100 },
+                    from: None,
+                    text: None,
+                }),
+                data: Some("pg:f:token:1".into()),
+            }),
+            inline_query: None,
+        };
+
+        let keys = idempotency_keys(&update);
+
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].key, "TELEGRAM_UPDATE#124");
     }
 
     #[test]
