@@ -2,8 +2,9 @@ use crate::commons::CommonsClient;
 use crate::config::Config;
 use crate::models::{
     COMMONS_AUDIO_EXTENSIONS, COMMONS_DOCUMENT_EXTENSIONS, COMMONS_IMAGE_EXTENSIONS,
-    COMMONS_MODEL_EXTENSIONS, COMMONS_VIDEO_EXTENSIONS, DeliveryMode, DocumentPageMode, FileType,
-    Intent, Preferences, SearchQuery,
+    COMMONS_MODEL_EXTENSIONS, COMMONS_VIDEO_EXTENSIONS, DEFAULT_INLINE_RESULT_COUNT, DeliveryMode,
+    DocumentPageMode, FileHit, FileType, INLINE_RESULT_COUNT_OPTIONS, Intent, Preferences,
+    SearchQuery, normalize_inline_result_count,
 };
 use crate::pagination::{BUTTON_PAGE_SIZE, category_page, file_page};
 use crate::parser::{is_commons_supported_extension, parse_intent, tokenize};
@@ -23,6 +24,7 @@ use tokio::time::timeout;
 
 const PAGINATED_RESULT_LIMIT: usize = BUTTON_PAGE_SIZE * 3;
 const INLINE_QUERY_TIMEOUT: Duration = Duration::from_secs(6);
+const INLINE_MAX_LOOKUP_RESULTS: usize = 151;
 
 /// Handles one AWS Lambda HTTP request from Telegram.
 pub async fn handle_lambda_request(request: Request) -> Result<Response<Body>> {
@@ -275,6 +277,7 @@ pub async fn handle_update(update: Update, config: &Config) -> Result<()> {
     if let Some(inline_query) = update.inline_query {
         let query_id = inline_query.id;
         let query_text = inline_query.query;
+        let result_offset = parse_inline_offset(&inline_query.offset);
         let user_id = inline_query.from.id;
         let location = inline_query.location;
         let inline_result = timeout(INLINE_QUERY_TIMEOUT, async {
@@ -286,6 +289,7 @@ pub async fn handle_update(update: Update, config: &Config) -> Result<()> {
             if parsed.file_type.is_none() {
                 parsed.file_type = Some(FileType::Images);
             }
+            let inline_result_count = prefs.normalized_inline_result_count();
             let use_location = location.is_some() && inline_location_applies(&parsed);
             let files = if let (Some(location), true) = (location, use_location) {
                 commons
@@ -294,20 +298,25 @@ pub async fn handle_update(update: Update, config: &Config) -> Result<()> {
                         location.longitude,
                         &parsed,
                         &prefs,
-                        20,
+                        inline_lookup_limit(result_offset, inline_result_count),
                         config.max_file_bytes,
                     )
                     .await?
             } else {
                 commons
-                    .search_files(&parsed, &prefs, 20, config.max_file_bytes)
+                    .search_files(
+                        &parsed,
+                        &prefs,
+                        inline_lookup_limit(result_offset, inline_result_count),
+                        config.max_file_bytes,
+                    )
                     .await?
             };
-            Ok::<_, anyhow::Error>((files, use_location))
+            Ok::<_, anyhow::Error>((files, use_location, inline_result_count))
         })
         .await;
 
-        let (files, use_location) = match inline_result {
+        let (files, use_location, inline_result_count) = match inline_result {
             Ok(result) => result?,
             Err(_) => {
                 tracing::warn!(
@@ -315,10 +324,18 @@ pub async fn handle_update(update: Update, config: &Config) -> Result<()> {
                     timeout_ms = INLINE_QUERY_TIMEOUT.as_millis(),
                     "inline search timed out before Telegram deadline"
                 );
-                (Vec::new(), false)
+                (Vec::new(), false, DEFAULT_INLINE_RESULT_COUNT)
             }
         };
-        answer_inline_query_safely(&telegram, &query_id, &files, use_location).await?;
+        let (files, next_offset) = inline_result_page(files, result_offset, inline_result_count);
+        answer_inline_query_safely(
+            &telegram,
+            &query_id,
+            &files,
+            use_location,
+            next_offset.as_deref(),
+        )
+        .await?;
     }
 
     Ok(())
@@ -328,11 +345,12 @@ pub async fn handle_update(update: Update, config: &Config) -> Result<()> {
 async fn answer_inline_query_safely(
     telegram: &TelegramClient,
     query_id: &str,
-    files: &[crate::models::FileHit],
+    files: &[FileHit],
     is_personal: bool,
+    next_offset: Option<&str>,
 ) -> Result<()> {
     match telegram
-        .answer_inline_query(query_id, files, is_personal)
+        .answer_inline_query(query_id, files, is_personal, next_offset)
         .await
     {
         Ok(()) => Ok(()),
@@ -353,6 +371,40 @@ fn is_expired_inline_query_error(error: &anyhow::Error) -> bool {
     message.contains("query is too old")
         || message.contains("response timeout expired")
         || message.contains("query ID is invalid")
+}
+
+/// Parses Telegram inline pagination offsets, defaulting safely to the first page.
+fn parse_inline_offset(offset: &str) -> usize {
+    offset
+        .parse::<usize>()
+        .ok()
+        .filter(|offset| *offset < INLINE_MAX_LOOKUP_RESULTS)
+        .unwrap_or_default()
+}
+
+/// Returns how many Commons results are needed to render one inline page plus lookahead.
+fn inline_lookup_limit(offset: usize, inline_result_count: usize) -> usize {
+    let page_size = normalize_inline_result_count(inline_result_count);
+    offset
+        .saturating_add(page_size + 1)
+        .min(INLINE_MAX_LOOKUP_RESULTS)
+}
+
+/// Slices one Telegram inline result page and returns the next offset when available.
+fn inline_result_page(
+    files: Vec<FileHit>,
+    offset: usize,
+    inline_result_count: usize,
+) -> (Vec<FileHit>, Option<String>) {
+    let page_size = normalize_inline_result_count(inline_result_count);
+    let has_more = files.len() > offset.saturating_add(page_size);
+    let page = files
+        .into_iter()
+        .skip(offset)
+        .take(page_size)
+        .collect::<Vec<_>>();
+    let next_offset = has_more.then(|| (offset + page_size).to_string());
+    (page, next_offset)
 }
 
 /// Returns true when inline location should rank results by nearby coordinates.
@@ -669,6 +721,16 @@ fn apply_preference_callback(
             preferences.file_type = file_type;
             render = changed;
         }
+        _ if action.starts_with("inline:") => {
+            let count = action
+                .trim_start_matches("inline:")
+                .parse::<usize>()
+                .ok()
+                .map(normalize_inline_result_count)?;
+            changed = preferences.normalized_inline_result_count() != count;
+            preferences.inline_result_count = count;
+            render = changed;
+        }
         _ if action.starts_with("pdf:") => {
             let mode = DocumentPageMode::parse(action.trim_start_matches("pdf:"))?;
             changed = preferences.pdf_mode != mode;
@@ -783,6 +845,18 @@ fn main_preferences_keyboard(preferences: &Preferences) -> Vec<Vec<InlineKeyboar
             toggle_label(preferences.pagination_enabled, "Pagination"),
             "pref:toggle:pagination",
         )],
+        INLINE_RESULT_COUNT_OPTIONS
+            .iter()
+            .map(|count| {
+                pref_button(
+                    checked_label(
+                        preferences.normalized_inline_result_count() == *count,
+                        &format!("Inline {count}"),
+                    ),
+                    format!("pref:inline:{count}"),
+                )
+            })
+            .collect(),
         vec![
             pref_button(
                 checked_label(
@@ -963,6 +1037,11 @@ pub fn update_preferences(text: &str, mut preferences: Preferences) -> Preferenc
             ("preview-metadata" | "metadata", "off") => preferences.show_preview_metadata = false,
             ("pagination", "on") => preferences.pagination_enabled = true,
             ("pagination", "off") => preferences.pagination_enabled = false,
+            ("inline" | "inline-count", value) => {
+                if let Ok(count) = value.parse::<usize>() {
+                    preferences.inline_result_count = normalize_inline_result_count(count);
+                }
+            }
             ("mode", value) => {
                 if let Some(mode) = DeliveryMode::parse(value) {
                     preferences.delivery_mode = mode;
@@ -1021,13 +1100,14 @@ fn format_preferences(preferences: &Preferences, config: &Config) -> String {
         "saved in DynamoDB when configured"
     };
     format!(
-        "Preferences ({storage})\n\nCategory counts: {}\nMode: {}\nFile type: {}\nExtension: {}\nPreview metadata: {}\nPagination: {}\nSHA-1: {}\nFile size in buttons: {}\nFavorites: {}\nCategory blacklist: {}\nUploader blacklist: {}\n\nUse the buttons below, or commands:\n/settings mode buttons|links10|images10|images20\n/settings type all|images|audio|video\n/settings ext jpg|webp|flac|pdf|off\n/settings category-counts on|off\n/settings preview-metadata on|off\n/settings pagination on|off\n/settings sha1 on|off\n/settings filesize on|off\n/settings favorite add Category name\n/settings blacklist-category add Category name\n/settings blacklist-user add Username\n\nAliases: /prefs, /preferences",
+        "Preferences ({storage})\n\nCategory counts: {}\nMode: {}\nFile type: {}\nExtension: {}\nPreview metadata: {}\nPagination: {}\nInline results: {}\nSHA-1: {}\nFile size in buttons: {}\nFavorites: {}\nCategory blacklist: {}\nUploader blacklist: {}\n\nUse the buttons below, or commands:\n/settings mode buttons|links10|images10|images20\n/settings type all|images|audio|video\n/settings ext jpg|webp|flac|pdf|off\n/settings category-counts on|off\n/settings preview-metadata on|off\n/settings pagination on|off\n/settings inline 10|20|50\n/settings sha1 on|off\n/settings filesize on|off\n/settings favorite add Category name\n/settings blacklist-category add Category name\n/settings blacklist-user add Username\n\nAliases: /prefs, /preferences",
         yes_no(preferences.show_category_counts),
         preferences.delivery_mode.as_pref_value(),
         preferences.file_type.as_pref_value(),
         preferences.extension.as_deref().unwrap_or("none"),
         yes_no(preferences.show_preview_metadata),
         yes_no(preferences.pagination_enabled),
+        preferences.normalized_inline_result_count(),
         yes_no(preferences.show_sha1),
         yes_no(preferences.show_file_size),
         preferences.favorite_categories.join(", "),
@@ -1047,7 +1127,7 @@ fn help_text(config: &Config, preferences: &Preferences) -> String {
         )
     };
     format!(
-        "<b>Wikimedia Commons bot</b>\n\nUnofficial Wikimedia Commons search bot. Source: <a href=\"{}\">{}</a>\nLicense: MIT\n\nSearch examples:\n<pre>Minsk\n-img Minsk\n-links Minsk\nimage Minsk\nbild Berlin\naudio:bird\nflac Minsk c birds\nUser:Vitaly_Zdanevich date:2025 Minsk\nuser:Vitaly_Zdanevich d:7days audio:something\ns:&gt;10MB s:&lt;20MB Minsk\nCategory Minsk\nKategorie Berlin\nКатегория Минск\nКатэгорыя Мінск</pre>\n\nAliases: category/c, Kategorie/kat/k, категория/катэгорыя/к/с; user/u/Benutzer; image/images/img/i, Bild/Bilder/Foto/Fotos, выява/ваява/в; audio/sound/music, Ton/Klang/Musik, аудио/музыка/звук/аудыё; date/d/Datum; size/s/Größe/Groesse/g. Use -img for Telegram image previews with metadata captions, -links for 10 compact links, and /settings to open preferences. Preview metadata and button pagination are enabled by default and can be disabled in /settings.\n\nInline mode can use Telegram's shared location to show nearby geotagged images. Without location, or with structured filters like user:, category, date, size, or extension, it searches by your typed query.\n\nClick file buttons to receive the file with metadata, license, uploader, date, source link, geolocation when available, and upload version count. Telegram bot uploads are limited to 50 MB, so larger files are filtered out. Files larger than 20 MB use red buttons; audio uses blue buttons.\n\nUpload your own free photos, audio, video, and other files to Wikimedia Commons: <a href=\"https://commons.wikimedia.org/wiki/Special:UploadWizard\">Upload Wizard</a>. Many upload tools are listed at <a href=\"https://commons.wikimedia.org/wiki/Commons:Upload_tools\">Commons upload tools</a>. Storage is unlimited, and all files are public.\n\nSupport: @vitaly_zdanevich\n\nAWS free-tier docs: <a href=\"https://aws.amazon.com/lambda/pricing/\">Lambda</a>, <a href=\"https://aws.amazon.com/dynamodb/pricing/\">DynamoDB</a>.{favorites}",
+        "<b>Wikimedia Commons bot</b>\n\nUnofficial Wikimedia Commons search bot. Source: <a href=\"{}\">{}</a>\nLicense: MIT\n\nSearch examples:\n<pre>Minsk\n-img Minsk\n-links Minsk\nimage Minsk\nbild Berlin\naudio:bird\nflac Minsk c birds\nUser:Vitaly_Zdanevich date:2025 Minsk\nuser:Vitaly_Zdanevich d:7days audio:something\ns:&gt;10MB s:&lt;20MB Minsk\nCategory Minsk\nKategorie Berlin\nКатегория Минск\nКатэгорыя Мінск</pre>\n\nAliases: category/c, Kategorie/kat/k, категория/катэгорыя/к/с; user/u/Benutzer; image/images/img/i, Bild/Bilder/Foto/Fotos, выява/ваява/в; audio/sound/music, Ton/Klang/Musik, аудио/музыка/звук/аудыё; date/d/Datum; size/s/Größe/Groesse/g. Use -img for Telegram image previews with metadata captions, -links for 10 compact links, and /settings to open preferences. Preview metadata and button pagination are enabled by default and can be disabled in /settings.\n\nInline mode can use Telegram's shared location to show nearby geotagged images. Without location, or with structured filters like user:, category, date, size, or extension, it searches by your typed query. Inline result count can be set in /settings to 10, 20, or 50 for slower networks.\n\nClick file buttons to receive the file with metadata, license, uploader, date, source link, geolocation when available, and upload version count. Telegram bot uploads are limited to 50 MB, so larger files are filtered out. Files larger than 20 MB use red buttons; audio uses blue buttons.\n\nUpload your own free photos, audio, video, and other files to Wikimedia Commons: <a href=\"https://commons.wikimedia.org/wiki/Special:UploadWizard\">Upload Wizard</a>. Many upload tools are listed at <a href=\"https://commons.wikimedia.org/wiki/Commons:Upload_tools\">Commons upload tools</a>. Storage is unlimited, and all files are public.\n\nSupport: @vitaly_zdanevich\n\nAWS free-tier docs: <a href=\"https://aws.amazon.com/lambda/pricing/\">Lambda</a>, <a href=\"https://aws.amazon.com/dynamodb/pricing/\">DynamoDB</a>.{favorites}",
         config.github_url, config.github_url
     )
 }
@@ -1073,12 +1153,14 @@ fn yes_no(value: bool) -> &'static str {
 mod tests {
     use super::{
         ExtensionGroup, PreferencesView, apply_preference_callback, category_result_limit,
-        file_result_limit, help_text, inline_location_applies, is_expired_inline_query_error,
-        is_preferences_update_command, parse_pagination_callback, preferences_keyboard,
-        update_preferences,
+        file_result_limit, help_text, inline_location_applies, inline_lookup_limit,
+        inline_result_page, is_expired_inline_query_error, is_preferences_update_command,
+        parse_inline_offset, parse_pagination_callback, preferences_keyboard, update_preferences,
     };
     use crate::config::Config;
-    use crate::models::{DeliveryMode, FileType, Preferences, SearchQuery, SizeFilter, SizeOp};
+    use crate::models::{
+        DeliveryMode, FileHit, FileType, Preferences, SearchQuery, SizeFilter, SizeOp,
+    };
 
     #[test]
     fn updates_preferences_from_command() {
@@ -1092,6 +1174,8 @@ mod tests {
         assert!(!prefs.show_preview_metadata);
         let prefs = update_preferences("/prefs pagination off", prefs);
         assert!(!prefs.pagination_enabled);
+        let prefs = update_preferences("/prefs inline 10", prefs);
+        assert_eq!(prefs.inline_result_count, 10);
         let prefs = update_preferences("/settings ext webp", prefs);
         assert_eq!(prefs.extension, Some("webp".into()));
         let prefs = update_preferences("/settings ext avif", prefs);
@@ -1167,6 +1251,50 @@ mod tests {
     }
 
     #[test]
+    fn paginates_inline_results_with_next_offset() {
+        let files = (0..101)
+            .map(|page_id| FileHit {
+                page_id,
+                file_name: format!("{page_id}.jpg"),
+                ..FileHit::default()
+            })
+            .collect::<Vec<_>>();
+
+        let (page, next_offset) = inline_result_page(files, 50, 50);
+
+        assert_eq!(page.len(), 50);
+        assert_eq!(page[0].page_id, 50);
+        assert_eq!(next_offset.as_deref(), Some("100"));
+    }
+
+    #[test]
+    fn paginates_inline_results_with_smaller_preference() {
+        let files = (0..25)
+            .map(|page_id| FileHit {
+                page_id,
+                file_name: format!("{page_id}.jpg"),
+                ..FileHit::default()
+            })
+            .collect::<Vec<_>>();
+
+        let (page, next_offset) = inline_result_page(files, 0, 10);
+
+        assert_eq!(page.len(), 10);
+        assert_eq!(page[9].page_id, 9);
+        assert_eq!(next_offset.as_deref(), Some("10"));
+    }
+
+    #[test]
+    fn parses_and_caps_inline_offsets() {
+        assert_eq!(parse_inline_offset("50"), 50);
+        assert_eq!(parse_inline_offset("9999"), 0);
+        assert_eq!(parse_inline_offset("not-a-number"), 0);
+        assert_eq!(inline_lookup_limit(0, 50), 51);
+        assert_eq!(inline_lookup_limit(100, 50), 151);
+        assert_eq!(inline_lookup_limit(0, 10), 11);
+    }
+
+    #[test]
     fn builds_preferences_keyboard_with_checks() {
         let prefs = Preferences {
             delivery_mode: DeliveryMode::Links10,
@@ -1187,6 +1315,7 @@ mod tests {
         assert!(labels.contains(&"✅ SHA-1"));
         assert!(labels.contains(&"✅ Preview metadata"));
         assert!(labels.contains(&"✅ Pagination"));
+        assert!(labels.contains(&"✅ Inline 50"));
         assert!(labels.contains(&"Extension: webp"));
     }
 
@@ -1217,6 +1346,14 @@ mod tests {
 
         assert!(result.changed);
         assert!(!result.preferences.pagination_enabled);
+    }
+
+    #[test]
+    fn applies_inline_count_callback() {
+        let result = apply_preference_callback("inline:10", Preferences::default()).unwrap();
+
+        assert!(result.changed);
+        assert_eq!(result.preferences.inline_result_count, 10);
     }
 
     #[test]

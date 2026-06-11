@@ -76,6 +76,9 @@ pub struct InlineQuery {
     pub from: User,
     /// Query text.
     pub query: String,
+    /// Offset requested by Telegram for inline result pagination.
+    #[serde(default)]
+    pub offset: String,
     /// User location when BotFather inline location data is enabled.
     pub location: Option<Location>,
 }
@@ -454,23 +457,24 @@ impl TelegramClient {
         query_id: &str,
         files: &[FileHit],
         is_personal: bool,
+        next_offset: Option<&str>,
     ) -> Result<()> {
         let results = files
             .iter()
-            .take(20)
+            .take(50)
             .filter_map(inline_result)
             .collect::<Vec<_>>();
         let cache_time = if results.is_empty() { 1 } else { 60 };
-        self.post_json(
-            "answerInlineQuery",
-            &serde_json::json!({
-                "inline_query_id": query_id,
-                "results": results,
-                "cache_time": cache_time,
-                "is_personal": is_personal
-            }),
-        )
-        .await?;
+        let mut payload = serde_json::json!({
+            "inline_query_id": query_id,
+            "results": results,
+            "cache_time": cache_time,
+            "is_personal": is_personal
+        });
+        if let Some(next_offset) = next_offset {
+            payload["next_offset"] = serde_json::Value::String(next_offset.to_string());
+        }
+        self.post_json("answerInlineQuery", &payload).await?;
         Ok(())
     }
 
@@ -1271,6 +1275,7 @@ mod tests {
                     "id": "abc",
                     "from": {"id": 42},
                     "query": "Minsk",
+                    "offset": "50",
                     "location": {
                         "latitude": 53.9023,
                         "longitude": 27.5619,
@@ -1284,6 +1289,7 @@ mod tests {
         let inline_query = update.inline_query.unwrap();
         let location = inline_query.location.unwrap();
         assert_eq!(inline_query.query, "Minsk");
+        assert_eq!(inline_query.offset, "50");
         assert_eq!(location.latitude, 53.9023);
         assert_eq!(location.longitude, 27.5619);
         assert_eq!(location.horizontal_accuracy, Some(25.0));

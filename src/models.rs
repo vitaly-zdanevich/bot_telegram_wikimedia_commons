@@ -7,6 +7,12 @@ pub const DEFAULT_MAX_FILE_BYTES: u64 = 50 * 1024 * 1024;
 /// Files above this size should be uploaded multipart instead of sent by URL.
 pub const TELEGRAM_REMOTE_URL_LIMIT_BYTES: u64 = 20 * 1024 * 1024;
 
+/// Default number of inline results to return per Telegram inline answer.
+pub const DEFAULT_INLINE_RESULT_COUNT: usize = 50;
+
+/// Supported inline result count preferences.
+pub const INLINE_RESULT_COUNT_OPTIONS: &[usize] = &[10, 20, 50];
+
 /// Image extensions currently accepted by Wikimedia Commons.
 pub const COMMONS_IMAGE_EXTENSIONS: &[&str] = &[
     "gif", "jpeg", "jpg", "png", "svg", "tif", "tiff", "webp", "xcf",
@@ -172,6 +178,9 @@ pub struct Preferences {
     /// Whether file/category button lists should include in-place pagination.
     #[serde(default = "default_true")]
     pub pagination_enabled: bool,
+    /// Number of results returned per Telegram inline query page.
+    #[serde(default = "default_inline_result_count")]
+    pub inline_result_count: usize,
     /// PDF delivery mode.
     pub pdf_mode: DocumentPageMode,
     /// DjVu delivery mode.
@@ -192,15 +201,37 @@ impl Default for Preferences {
             show_file_size: false,
             show_preview_metadata: true,
             pagination_enabled: true,
+            inline_result_count: DEFAULT_INLINE_RESULT_COUNT,
             pdf_mode: DocumentPageMode::Original,
             djvu_mode: DocumentPageMode::Original,
         }
     }
 }
 
+impl Preferences {
+    /// Returns a Telegram-safe inline result count from the stored preference.
+    pub fn normalized_inline_result_count(&self) -> usize {
+        normalize_inline_result_count(self.inline_result_count)
+    }
+}
+
 /// Returns true for serde defaults that should be enabled for old preference JSON.
 fn default_true() -> bool {
     true
+}
+
+/// Returns the default inline result count for old preference JSON.
+fn default_inline_result_count() -> usize {
+    DEFAULT_INLINE_RESULT_COUNT
+}
+
+/// Returns a supported inline result count, falling back to the default.
+pub fn normalize_inline_result_count(value: usize) -> usize {
+    if INLINE_RESULT_COUNT_OPTIONS.contains(&value) {
+        value
+    } else {
+        DEFAULT_INLINE_RESULT_COUNT
+    }
 }
 
 /// A parsed top-level user intent.

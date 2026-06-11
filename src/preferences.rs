@@ -1,6 +1,9 @@
 use crate::aws::AwsJsonClient;
 use crate::config::Config;
-use crate::models::{DeliveryMode, DocumentPageMode, FileType, Preferences};
+use crate::models::{
+    DEFAULT_INLINE_RESULT_COUNT, DeliveryMode, DocumentPageMode, FileType, Preferences,
+    normalize_inline_result_count,
+};
 use anyhow::Result;
 use once_cell::sync::Lazy;
 use serde_json::{Value, json};
@@ -121,6 +124,9 @@ fn item_to_preferences(item: &Value) -> Preferences {
         show_file_size: attr_bool(item, "show_file_size").unwrap_or(false),
         show_preview_metadata: attr_bool(item, "show_preview_metadata").unwrap_or(true),
         pagination_enabled: attr_bool(item, "pagination_enabled").unwrap_or(true),
+        inline_result_count: attr_usize(item, "inline_result_count")
+            .map(normalize_inline_result_count)
+            .unwrap_or(DEFAULT_INLINE_RESULT_COUNT),
         pdf_mode: attr_string(item, "pdf_mode")
             .and_then(|value| DocumentPageMode::parse(&value))
             .unwrap_or_default(),
@@ -146,6 +152,7 @@ fn preferences_to_item(telegram_user_id: i64, preferences: &Preferences) -> Valu
         "show_file_size": {"BOOL": preferences.show_file_size},
         "show_preview_metadata": {"BOOL": preferences.show_preview_metadata},
         "pagination_enabled": {"BOOL": preferences.pagination_enabled},
+        "inline_result_count": {"N": preferences.normalized_inline_result_count().to_string()},
         "pdf_mode": {"S": preferences.pdf_mode.as_pref_value()},
         "djvu_mode": {"S": preferences.djvu_mode.as_pref_value()},
     })
@@ -159,6 +166,11 @@ fn attr_string(item: &Value, key: &str) -> Option<String> {
 /// Reads a DynamoDB bool attribute.
 fn attr_bool(item: &Value, key: &str) -> Option<bool> {
     item.get(key)?.get("BOOL")?.as_bool()
+}
+
+/// Reads a DynamoDB unsigned integer attribute.
+fn attr_usize(item: &Value, key: &str) -> Option<usize> {
+    item.get(key)?.get("N")?.as_str()?.parse::<usize>().ok()
 }
 
 /// Reads a DynamoDB string list attribute.
@@ -178,7 +190,7 @@ fn attr_string_list(item: &Value, key: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{item_to_preferences, preferences_to_item};
-    use crate::models::{DeliveryMode, FileType, Preferences};
+    use crate::models::{DEFAULT_INLINE_RESULT_COUNT, DeliveryMode, FileType, Preferences};
     use serde_json::json;
 
     #[test]
@@ -192,6 +204,7 @@ mod tests {
             show_sha1: true,
             show_preview_metadata: false,
             pagination_enabled: false,
+            inline_result_count: 10,
             ..Preferences::default()
         };
         let item = preferences_to_item(42, &prefs);
@@ -204,6 +217,7 @@ mod tests {
         assert!(parsed.show_sha1);
         assert!(!parsed.show_preview_metadata);
         assert!(!parsed.pagination_enabled);
+        assert_eq!(parsed.inline_result_count, 10);
     }
 
     #[test]
@@ -215,5 +229,6 @@ mod tests {
         let preferences = item_to_preferences(&item);
         assert!(preferences.show_preview_metadata);
         assert!(preferences.pagination_enabled);
+        assert_eq!(preferences.inline_result_count, DEFAULT_INLINE_RESULT_COUNT);
     }
 }

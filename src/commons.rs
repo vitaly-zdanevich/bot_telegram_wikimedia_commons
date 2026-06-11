@@ -151,7 +151,7 @@ impl CommonsClient {
             .append_pair("formatversion", "2")
             .append_pair("generator", "search")
             .append_pair("gsrnamespace", "6")
-            .append_pair("gsrlimit", &SEARCH_CANDIDATE_LIMIT.to_string())
+            .append_pair("gsrlimit", &search_candidate_limit(limit).to_string())
             .append_pair("gsrsearch", &search)
             .append_pair("prop", "imageinfo")
             .append_pair("iilimit", "20")
@@ -200,7 +200,7 @@ impl CommonsClient {
             .append_pair("gsnamespace", "6")
             .append_pair("gscoord", &format!("{latitude}|{longitude}"))
             .append_pair("gsradius", &NEARBY_SEARCH_RADIUS_METERS.to_string())
-            .append_pair("gslimit", &SEARCH_CANDIDATE_LIMIT.to_string());
+            .append_pair("gslimit", &search_candidate_limit(limit).to_string());
 
         let response = self.get_json::<GeoSearchResponse>(url).await?;
         let page_ids = response
@@ -747,6 +747,13 @@ pub fn build_cirrus_query(
 /// Returns the requested `iiprop` list for file metadata.
 fn imageinfo_props() -> &'static str {
     "timestamp|user|url|size|sha1|mime|mediatype|metadata|commonmetadata|extmetadata"
+}
+
+/// Returns enough Commons candidates for local filters while bounding inline latency.
+fn search_candidate_limit(result_limit: usize) -> usize {
+    result_limit
+        .saturating_mul(2)
+        .clamp(SEARCH_CANDIDATE_LIMIT, 200)
 }
 
 /// Maps common extensions to MIME types used by Commons search.
