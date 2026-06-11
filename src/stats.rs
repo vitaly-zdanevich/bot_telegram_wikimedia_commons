@@ -104,7 +104,7 @@ impl StatsSnapshot {
 /// Renders fixed-width summary rows for Telegram monospace display.
 fn render_summary_block(stats: &StatsSnapshot) -> String {
     format!(
-        "Calls    24h {:>8}  7d {:>8}\nErrors   24h {:>8}  7d {:>8}  month {:>8}\nDuration min {:>6.0} ms avg {:>6.0} ms max {:>6.0} ms",
+        "Calls\n24h {:>8}\n7d  {:>8}\n\nErrors\n24h {:>8}\n7d  {:>8}\n30d {:>8}\n\nDuration\nmin {:>6.0} ms\navg {:>6.0} ms\nmax {:>6.0} ms",
         stats.invocations_24h,
         stats.invocations_7d,
         stats.errors_24h,
@@ -378,15 +378,22 @@ mod tests {
     #[test]
     fn renders_summary_block_for_monospace() {
         let stats = StatsSnapshot {
-            invocations_24h: 2,
-            invocations_7d: 10,
+            invocations_24h: 267,
+            invocations_7d: 267,
+            errors_24h: 81,
+            errors_7d: 81,
             errors_month: 1,
-            avg_duration_ms: 45.0,
+            min_duration_ms: 1.0,
+            avg_duration_ms: 1569.0,
+            max_duration_ms: 21174.0,
             ..StatsSnapshot::default()
         };
         let block = render_summary_block(&stats);
-        assert!(block.contains("Calls"));
-        assert!(block.contains("Duration"));
+        assert_eq!(
+            block,
+            "Calls\n24h      267\n7d       267\n\nErrors\n24h       81\n7d        81\n30d        1\n\nDuration\nmin      1 ms\navg   1569 ms\nmax  21174 ms"
+        );
+        assert!(block.lines().all(|line| line.chars().count() <= 13));
     }
 
     #[test]
