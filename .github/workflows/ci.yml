@@ -87,7 +87,7 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v6
+      - uses: actions/download-artifact@v8
         with:
           path: dist
       - name: Update rolling CI release
@@ -127,7 +127,7 @@ jobs:
         if: ${{ env.SONAR_TOKEN != '' }}
       - run: cargo llvm-cov --all-features --workspace --lcov --output-path coverage/lcov.info
         if: ${{ env.SONAR_TOKEN != '' }}
-      - uses: SonarSource/sonarqube-scan-action@v6
+      - uses: SonarSource/sonarqube-scan-action@v8
         if: ${{ env.SONAR_TOKEN != '' }}
 
   integration:
