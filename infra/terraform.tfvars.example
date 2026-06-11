@@ -1,0 +1,5 @@
+telegram_bot_token      = "123456:replace-me"
+telegram_webhook_secret = "replace-with-random-secret"
+admin_telegram_user_ids = "123456789"
+enable_test_endpoint    = true
+commons_auth_cookie_ssm_parameter = "/telegram-wikimedia-commons-bot/commons-auth-cookie-jar"
