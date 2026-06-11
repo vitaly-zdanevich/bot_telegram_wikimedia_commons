@@ -127,7 +127,7 @@ fn render_cache_block(cache: &CommonsCacheStats) -> String {
         cache.tmp_file_bytes_max_bytes as f64,
     );
     format!(
-        "RAM meta entries {:>8}\nRAM file bytes  {:>8} / {:>8} ({:>5.1}%) entries {:>5}\n/tmp file bytes {:>8} / {:>8} ({:>5.1}%) entries {:>5}\nSearch entries   {:>8}\nCategory entries {:>8}",
+        "RAM meta {:>8}\n\nRAM files\nused    {:>8}\nlimit   {:>8}\npct     {:>7.1}%\nentries {:>8}\n\n/tmp files\nused    {:>8}\nlimit   {:>8}\npct     {:>7.1}%\nentries {:>8}\n\nSearch   {:>8}\nCategory {:>8}",
         cache.ram_metadata_entries(),
         format_bytes(cache.ram_file_bytes_bytes as u64),
         format_bytes(cache.ram_file_bytes_max_bytes as u64),
@@ -422,10 +422,11 @@ mod tests {
             ..CommonsCacheStats::default()
         });
 
-        assert!(block.contains("RAM meta entries"));
-        assert!(block.contains("RAM file bytes"));
-        assert!(block.contains("/tmp file bytes"));
-        assert!(block.contains("10.0%"));
+        assert_eq!(
+            block,
+            "RAM meta       11\n\nRAM files\nused     10.0 MB\nlimit   100.0 MB\npct        10.0%\nentries        1\n\n/tmp files\nused     20.0 MB\nlimit   200.0 MB\npct        10.0%\nentries        2\n\nSearch          3\nCategory        4"
+        );
+        assert!(block.lines().all(|line| line.chars().count() <= 17));
     }
 
     #[test]
