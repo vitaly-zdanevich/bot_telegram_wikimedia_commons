@@ -1468,7 +1468,7 @@ dependencies = [
 
 [[package]]
 name = "telegram-wikimedia-commons-bot"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "anyhow",
  "base64",

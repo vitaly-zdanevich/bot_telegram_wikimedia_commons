@@ -190,7 +190,6 @@ All files on Wikimedia Commons are public.
 Other Telegram bots:
 
 - GitHub: [bot_telegram_rutracker](https://github.com/vitaly-zdanevich/bot_telegram_rutracker) - Telegram bot for RuTracker search and download.
-- GitHub: [bot_telegram_wikipedia](https://github.com/vitaly-zdanevich/bot_telegram_wikipedia) - Telegram bot for Wikipedia search on AWS Lambda.
 - GitLab: [bot_telegram_youtube](https://gitlab.com/vitaly-zdanevich/bot_telegram_youtube) - Telegram bot for YouTube search, channels, audio, favorites, and comments.
 - GitLab: [bot_telegram_evernote](https://gitlab.com/vitaly-zdanevich/bot_telegram_evernote) - Telegram bot for Evernote on AWS Lambda.
 
@@ -200,7 +199,6 @@ Wikipedia, Wikimedia Commons, Wikidata, and MediaWiki-related projects:
 - GitHub: [bot_telegram_wikipedia](https://github.com/vitaly-zdanevich/bot_telegram_wikipedia) - Telegram bot for Wikipedia search on AWS Lambda.
 - GitHub: [wikipedia-userstyle-dark-minimum](https://github.com/vitaly-zdanevich/wikipedia-userstyle-dark-minimum) - dark minimum userstyle for Wikipedia.
 - GitLab: [commons-wikimedia-find-by-hash](https://gitlab.com/vitaly-zdanevich/commons-wikimedia-find-by-hash) - find Wikimedia Commons files by hash.
-- GitLab: [swift-uploader-to-wikimedia-commons](https://gitlab.com/vitaly-zdanevich/swift-uploader-to-wikimedia-commons) - Swift uploader for Wikimedia Commons.
 - GitLab: [video-to-webm-av1-opus](https://gitlab.com/vitaly-zdanevich/video-to-webm-av1-opus) - convert video to Wikimedia Commons-compatible WebM.
 - GitLab: [wikidata-import-from-metacritic](https://gitlab.com/vitaly-zdanevich/wikidata-import-from-metacritic) - Wikidata import helper.
 - GitLab: [globustut-domain-move-on-wikipedia](https://gitlab.com/vitaly-zdanevich/globustut-domain-move-on-wikipedia) - dataset for a Wikipedia domain move.
