@@ -182,7 +182,7 @@ Wikimedia Commons upload links shown in `/help`:
 
 All files on Wikimedia Commons are public.
 
-## Related Projects
+## My Related Projects
 
 Other Telegram bots:
 
@@ -196,14 +196,6 @@ Wikipedia, Wikimedia Commons, Wikidata, and MediaWiki-related projects:
 - GitHub: [bot_telegram_wikimedia_commons](https://github.com/vitaly-zdanevich/bot_telegram_wikimedia_commons) - this bot.
 - GitHub: [bot_telegram_wikipedia](https://github.com/vitaly-zdanevich/bot_telegram_wikipedia) - Telegram bot for Wikipedia search on AWS Lambda.
 - GitHub: [wikipedia-userstyle-dark-minimum](https://github.com/vitaly-zdanevich/wikipedia-userstyle-dark-minimum) - dark minimum userstyle for Wikipedia.
-- GitHub: [parse-wiki-text-2](https://github.com/vitaly-zdanevich/parse-wiki-text-2) - wiki text parser work.
-- GitHub: [Git-Mediawiki](https://github.com/vitaly-zdanevich/Git-Mediawiki) - gate between Git and MediaWiki.
-- GitHub: [vim-mediawiki](https://github.com/vitaly-zdanevich/vim-mediawiki) - Vim plugin to edit MediaWiki pages.
-- GitHub: [mediawiki-tools-cli](https://github.com/vitaly-zdanevich/mediawiki-tools-cli) - GitHub mirror of Wikimedia's MediaWiki CLI tools.
-- GitHub: [dtMediaWiki](https://github.com/vitaly-zdanevich/dtMediaWiki) - Wikimedia Commons export plugin for darktable.
-- GitHub: [vicuna](https://github.com/vitaly-zdanevich/vicuna) - tool for uploading files to Wikimedia Commons and other Wikimedia projects.
-- GitHub: [pageviews](https://github.com/vitaly-zdanevich/pageviews) - pageviews analysis tool for Wikimedia Foundation wikis.
-- GitHub: [xtools](https://github.com/vitaly-zdanevich/xtools) - analysis tools for MediaWiki websites.
 - GitLab: [commons-wikimedia-find-by-hash](https://gitlab.com/vitaly-zdanevich/commons-wikimedia-find-by-hash) - find Wikimedia Commons files by hash.
 - GitLab: [swift-uploader-to-wikimedia-commons](https://gitlab.com/vitaly-zdanevich/swift-uploader-to-wikimedia-commons) - Swift uploader for Wikimedia Commons.
 - GitLab: [video-to-webm-av1-opus](https://gitlab.com/vitaly-zdanevich/video-to-webm-av1-opus) - convert video to Wikimedia Commons-compatible WebM.
