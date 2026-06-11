@@ -86,7 +86,7 @@ impl StatsSnapshot {
         };
 
         format!(
-            "Stats\n\n<pre>{}</pre>\n\nCache\n<pre>{}</pre>\n{}\nFree tier use estimate, based on last 7 days as a rough monthly signal:\nLambda requests: {:.1}%\nLambda duration: {:.1}% ({:.0} GB-s)\nDynamoDB storage: {:.3}% ({:.4} GB)\n\nAWS Lambda free tier: https://aws.amazon.com/lambda/pricing/\nDynamoDB free tier: https://aws.amazon.com/dynamodb/pricing/\nCloudWatch: {}\nDynamoDB: {}",
+            "Stats\n\n<pre>{}</pre>\n\nCache\n<pre>{}</pre>\n{}\nFree tier use estimate, based on last 7 days as a rough monthly signal:\nLambda requests: {:.1}%\nLambda duration: {:.1}% ({:.0} GB-s)\nDynamoDB storage: {:.3}% ({:.4} GB)\n\nAWS Lambda free tier:\nhttps://aws.amazon.com/lambda/pricing/\n\nDynamoDB free tier: 25 GB, 25 RCU/WCU:\nhttps://aws.amazon.com/dynamodb/pricing/\n\nCloudWatch:\n{}\n\nDynamoDB:\n{}",
             encode_text(&summary),
             encode_text(&cache),
             daily_chart,
@@ -509,8 +509,16 @@ mod tests {
         assert!(rendered.contains("Calls per day"));
         assert!(rendered.contains("Lambda requests: 0.0%"));
         assert!(rendered.contains("DynamoDB storage: 4.000%"));
-        assert!(rendered.contains("logsV2:log-groups/log-group"));
-        assert!(rendered.contains("dynamodbv2/home?region=us-east-1#table?name=prefs"));
+        assert!(rendered.contains("AWS Lambda free tier:\nhttps://aws.amazon.com/lambda/pricing/"));
+        assert!(rendered.contains(
+            "DynamoDB free tier: 25 GB, 25 RCU/WCU:\nhttps://aws.amazon.com/dynamodb/pricing/"
+        ));
+        assert!(rendered.contains(
+            "CloudWatch:\nhttps://us-east-1.console.aws.amazon.com/cloudwatch/home?region=us-east-1#logsV2:log-groups/log-group/$252Faws$252Flambda$252Fcommons-bot"
+        ));
+        assert!(rendered.contains(
+            "\nDynamoDB:\nhttps://us-east-1.console.aws.amazon.com/dynamodbv2/home?region=us-east-1#table?name=prefs"
+        ));
     }
 
     #[test]
