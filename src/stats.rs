@@ -369,9 +369,11 @@ pub fn render_week_chart(values: &[u64; 7], labels: &[&str; 7]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CommonsCacheStats, StatsSnapshot, parse_metric_values, render_cache_block,
-        render_summary_block, render_week_chart,
+        CommonsCacheStats, StatsSnapshot, format_bytes, parse_metric_values, percent,
+        render_cache_block, render_summary_block, render_week_chart, weekday_label,
     };
+    use crate::config::Config;
+    use time::Weekday;
 
     #[test]
     fn renders_summary_block_for_monospace() {
@@ -432,5 +434,112 @@ mod tests {
             </GetMetricStatisticsResponse>
         "#;
         assert_eq!(parse_metric_values(xml, "Sum").unwrap(), vec![3.0, 7.0]);
+    }
+
+    #[test]
+    fn parses_metric_xml_ignores_invalid_values_and_other_tags() {
+        let xml = r#"
+            <Response>
+              <Average>12.5</Average>
+              <Sum>bad</Sum>
+              <Sum>7</Sum>
+              <Maximum>99</Maximum>
+            </Response>
+        "#;
+
+        assert_eq!(parse_metric_values(xml, "Sum").unwrap(), vec![7.0]);
+        assert_eq!(parse_metric_values(xml, "Maximum").unwrap(), vec![99.0]);
+    }
+
+    #[test]
+    fn renders_full_stats_dashboard_with_links_and_chart() {
+        let config = Config {
+            telegram_bot_token: None,
+            telegram_webhook_secret: None,
+            admin_user_ids: vec![42],
+            github_url: "https://github.com/example/repo".into(),
+            aws_region: "us-east-1".into(),
+            lambda_function_name: "commons-bot".into(),
+            dynamodb_table: Some("prefs".into()),
+            stateless_mode: false,
+            max_file_bytes: 50,
+            user_agent: "test".into(),
+            commons_api_url: "https://commons.wikimedia.org/w/api.php".into(),
+            commons_auth_cookie_ssm_parameter: None,
+            enable_test_endpoint: false,
+        };
+        let stats = StatsSnapshot {
+            invocations_24h: 12,
+            invocations_7d: 70,
+            errors_24h: 1,
+            errors_7d: 2,
+            errors_month: 3,
+            min_duration_ms: 10.0,
+            avg_duration_ms: 1000.0,
+            max_duration_ms: 2000.0,
+            dynamodb_size_bytes: 1024 * 1024 * 1024,
+            daily_invocations: [1, 2, 3, 4, 5, 6, 7],
+            daily_labels: [
+                "Mon".into(),
+                "Tue".into(),
+                "Wed".into(),
+                "Thu".into(),
+                "Fri".into(),
+                "Sat".into(),
+                "Sun".into(),
+            ],
+            commons_cache: CommonsCacheStats {
+                ram_file_bytes_max_bytes: 1024,
+                tmp_file_bytes_max_bytes: 2048,
+                ..CommonsCacheStats::default()
+            },
+        };
+
+        let rendered = stats.render_text(&config);
+
+        assert!(rendered.contains("Stats"));
+        assert!(rendered.contains("Calls per day"));
+        assert!(rendered.contains("Lambda requests: 0.0%"));
+        assert!(rendered.contains("DynamoDB storage: 4.000%"));
+        assert!(rendered.contains("logsV2:log-groups/log-group"));
+        assert!(rendered.contains("dynamodbv2/home?region=us-east-1#table?name=prefs"));
+    }
+
+    #[test]
+    fn renders_stateless_dashboard_without_dynamodb_link() {
+        let config = Config {
+            telegram_bot_token: None,
+            telegram_webhook_secret: None,
+            admin_user_ids: Vec::new(),
+            github_url: String::new(),
+            aws_region: "eu-west-1".into(),
+            lambda_function_name: "function".into(),
+            dynamodb_table: None,
+            stateless_mode: true,
+            max_file_bytes: 0,
+            user_agent: String::new(),
+            commons_api_url: String::new(),
+            commons_auth_cookie_ssm_parameter: None,
+            enable_test_endpoint: false,
+        };
+
+        let rendered = StatsSnapshot::default().render_text(&config);
+
+        assert!(rendered.contains("DynamoDB is disabled in stateless mode"));
+    }
+
+    #[test]
+    fn formats_bytes_and_percents() {
+        assert_eq!(format_bytes(999), "999 B");
+        assert_eq!(format_bytes(1536), "1.5 KB");
+        assert_eq!(format_bytes(2 * 1024 * 1024), "2.0 MB");
+        assert_eq!(percent(5.0, 0.0), 0.0);
+        assert_eq!(percent(5.0, 10.0), 50.0);
+    }
+
+    #[test]
+    fn weekday_labels_are_short_and_stable() {
+        assert_eq!(weekday_label(Weekday::Monday), "Mon");
+        assert_eq!(weekday_label(Weekday::Sunday), "Sun");
     }
 }

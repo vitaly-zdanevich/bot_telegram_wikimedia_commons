@@ -123,8 +123,11 @@ fn short_token(hasher: Sha256) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{BUTTON_PAGE_SIZE, file_list_token, page_count, page_from_items};
-    use crate::models::FileHit;
+    use super::{
+        BUTTON_PAGE_SIZE, category_list_token, category_page, file_list_token, file_page,
+        page_count, page_from_items, store_category_list, store_file_list,
+    };
+    use crate::models::{CategoryHit, FileHit};
 
     #[test]
     fn counts_button_pages() {
@@ -170,5 +173,75 @@ mod tests {
         second.reverse();
 
         assert_ne!(file_list_token(&first), file_list_token(&second));
+    }
+
+    #[test]
+    fn category_tokens_change_with_order() {
+        let first = vec![
+            CategoryHit {
+                page_id: 1,
+                title: "Category:A".into(),
+                ..CategoryHit::default()
+            },
+            CategoryHit {
+                page_id: 2,
+                title: "Category:B".into(),
+                ..CategoryHit::default()
+            },
+        ];
+        let mut second = first.clone();
+        second.reverse();
+
+        assert_ne!(category_list_token(&first), category_list_token(&second));
+    }
+
+    #[test]
+    fn empty_lists_have_no_page() {
+        assert!(page_from_items::<FileHit>(&[], 0).is_none());
+    }
+
+    #[test]
+    fn page_requests_clamp_to_last_page() {
+        let files = (0..21)
+            .map(|page_id| FileHit {
+                page_id,
+                ..FileHit::default()
+            })
+            .collect::<Vec<_>>();
+
+        let page = page_from_items(&files, 99).unwrap();
+
+        assert_eq!(page.page_index, 1);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].page_id, 20);
+    }
+
+    #[tokio::test]
+    async fn stores_and_reads_file_and_category_pages() {
+        let files = (0..25)
+            .map(|page_id| FileHit {
+                page_id,
+                title: format!("File:{page_id}.jpg"),
+                ..FileHit::default()
+            })
+            .collect::<Vec<_>>();
+        let categories = (0..25)
+            .map(|page_id| CategoryHit {
+                page_id,
+                title: format!("Category:{page_id}"),
+                ..CategoryHit::default()
+            })
+            .collect::<Vec<_>>();
+
+        let file_token = store_file_list(&files).await;
+        let category_token = store_category_list(&categories).await;
+
+        assert_eq!(file_page(&file_token, 1).await.unwrap().items.len(), 5);
+        assert_eq!(
+            category_page(&category_token, 1).await.unwrap().items.len(),
+            5
+        );
+        assert!(file_page("missing", 0).await.is_none());
+        assert!(category_page("missing", 0).await.is_none());
     }
 }

@@ -189,9 +189,30 @@ fn attr_string_list(item: &Value, key: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{item_to_preferences, preferences_to_item};
-    use crate::models::{DEFAULT_INLINE_RESULT_COUNT, DeliveryMode, FileType, Preferences};
+    use super::{PreferenceStore, item_to_preferences, preferences_to_item};
+    use crate::config::Config;
+    use crate::models::{
+        DEFAULT_INLINE_RESULT_COUNT, DeliveryMode, DocumentPageMode, FileType, Preferences,
+    };
     use serde_json::json;
+
+    fn test_config(stateless_mode: bool, dynamodb_table: Option<&str>) -> Config {
+        Config {
+            telegram_bot_token: None,
+            telegram_webhook_secret: None,
+            admin_user_ids: Vec::new(),
+            github_url: "https://github.com/vitaly-zdanevich/bot_telegram_wikimedia_commons".into(),
+            aws_region: "us-east-1".into(),
+            lambda_function_name: "telegram-wikimedia-commons-bot".into(),
+            dynamodb_table: dynamodb_table.map(str::to_string),
+            stateless_mode,
+            max_file_bytes: 50 * 1024 * 1024,
+            user_agent: "test-agent".into(),
+            commons_api_url: "https://commons.wikimedia.org/w/api.php".into(),
+            commons_auth_cookie_ssm_parameter: None,
+            enable_test_endpoint: false,
+        }
+    }
 
     #[test]
     fn round_trips_preferences_through_dynamodb_json() {
@@ -201,23 +222,34 @@ mod tests {
             file_type: FileType::Audio,
             extension: Some("flac".into()),
             favorite_categories: vec!["Minsk".into()],
+            blacklist_categories: vec!["Bad category".into()],
+            blacklist_uploaders: vec!["Example_User".into()],
             show_sha1: true,
+            show_file_size: true,
             show_preview_metadata: false,
             pagination_enabled: false,
             inline_result_count: 10,
-            ..Preferences::default()
+            pdf_mode: DocumentPageMode::RenderedPages,
+            djvu_mode: DocumentPageMode::RenderedPages,
         };
         let item = preferences_to_item(42, &prefs);
+        assert_eq!(item["pk"]["S"], "USER#42");
+        assert_eq!(item["sk"]["S"], "PREFERENCES");
         let parsed = item_to_preferences(&item);
         assert!(parsed.show_category_counts);
         assert_eq!(parsed.delivery_mode, DeliveryMode::Images20);
         assert_eq!(parsed.file_type, FileType::Audio);
         assert_eq!(parsed.extension, Some("flac".into()));
         assert_eq!(parsed.favorite_categories, vec!["Minsk"]);
+        assert_eq!(parsed.blacklist_categories, vec!["Bad category"]);
+        assert_eq!(parsed.blacklist_uploaders, vec!["Example_User"]);
         assert!(parsed.show_sha1);
+        assert!(parsed.show_file_size);
         assert!(!parsed.show_preview_metadata);
         assert!(!parsed.pagination_enabled);
         assert_eq!(parsed.inline_result_count, 10);
+        assert_eq!(parsed.pdf_mode, DocumentPageMode::RenderedPages);
+        assert_eq!(parsed.djvu_mode, DocumentPageMode::RenderedPages);
     }
 
     #[test]
@@ -230,5 +262,68 @@ mod tests {
         assert!(preferences.show_preview_metadata);
         assert!(preferences.pagination_enabled);
         assert_eq!(preferences.inline_result_count, DEFAULT_INLINE_RESULT_COUNT);
+    }
+
+    #[test]
+    fn malformed_dynamodb_attributes_fall_back_safely() {
+        let item = json!({
+            "show_category_counts": {"S": "true"},
+            "delivery_mode": {"S": "bad"},
+            "file_type": {"S": "bad"},
+            "extension": {"S": ""},
+            "favorite_categories": {"L": [{"S": "Minsk"}, {"N": "1"}]},
+            "blacklist_categories": {"S": "not-a-list"},
+            "blacklist_uploaders": {"L": [{"S": "Example_User"}]},
+            "show_sha1": {"BOOL": true},
+            "show_file_size": {"BOOL": true},
+            "show_preview_metadata": {"BOOL": false},
+            "pagination_enabled": {"BOOL": false},
+            "inline_result_count": {"N": "17"},
+            "pdf_mode": {"S": "bad"},
+            "djvu_mode": {"S": "rendered"}
+        });
+
+        let preferences = item_to_preferences(&item);
+
+        assert!(!preferences.show_category_counts);
+        assert_eq!(preferences.delivery_mode, DeliveryMode::Buttons);
+        assert_eq!(preferences.file_type, FileType::All);
+        assert_eq!(preferences.extension, None);
+        assert_eq!(preferences.favorite_categories, vec!["Minsk"]);
+        assert!(preferences.blacklist_categories.is_empty());
+        assert_eq!(preferences.blacklist_uploaders, vec!["Example_User"]);
+        assert!(preferences.show_sha1);
+        assert!(preferences.show_file_size);
+        assert!(!preferences.show_preview_metadata);
+        assert!(!preferences.pagination_enabled);
+        assert_eq!(preferences.inline_result_count, DEFAULT_INLINE_RESULT_COUNT);
+        assert_eq!(preferences.pdf_mode, DocumentPageMode::Original);
+        assert_eq!(preferences.djvu_mode, DocumentPageMode::RenderedPages);
+    }
+
+    #[tokio::test]
+    async fn stateless_store_does_not_persist_preferences() {
+        let store = PreferenceStore::new(&test_config(true, Some("preferences")));
+        let changed = Preferences {
+            show_sha1: true,
+            ..Preferences::default()
+        };
+
+        store.put(42, &changed).await.unwrap();
+
+        assert_eq!(store.get(42).await, Preferences::default());
+    }
+
+    #[tokio::test]
+    async fn store_without_table_does_not_require_aws_credentials() {
+        let store = PreferenceStore::new(&test_config(false, None));
+        let changed = Preferences {
+            delivery_mode: DeliveryMode::Links10,
+            ..Preferences::default()
+        };
+
+        store.put(42, &changed).await.unwrap();
+
+        assert_eq!(store.get(42).await, Preferences::default());
     }
 }

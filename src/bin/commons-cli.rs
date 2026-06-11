@@ -238,17 +238,75 @@ fn sanitize_filename(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, sanitize_filename};
+    use super::{Cli, OutputFormat, play_audio, preview_images, sanitize_filename};
     use clap::Parser;
+    use telegram_wikimedia_commons_bot::models::FileHit;
 
     #[test]
     fn sanitizes_file_names() {
         assert_eq!(sanitize_filename("a/b.jpg"), "a_b.jpg");
+        assert_eq!(sanitize_filename("nul\0name.jpg"), "nul_name.jpg");
     }
 
     #[test]
     fn parses_hyphen_prefixed_query_terms() {
         let cli = Cli::parse_from(["commons-cli", "minsk", "-img"]);
         assert_eq!(cli.query, vec!["minsk", "-img"]);
+    }
+
+    #[test]
+    fn parses_script_download_and_media_flags() {
+        let cli = Cli::parse_from([
+            "commons-cli",
+            "--format",
+            "jsonl",
+            "--no-animation",
+            "--bypass-50mb-limit",
+            "--sort-size",
+            "--download-category",
+            "Minsk",
+            "--recursive",
+            "--output-dir",
+            "out",
+            "--preview",
+            "--play-audio",
+            "bird",
+        ]);
+
+        assert_eq!(cli.query, vec!["bird"]);
+        assert_eq!(cli.format, OutputFormat::Jsonl);
+        assert!(cli.no_animation);
+        assert!(cli.bypass_50mb_limit);
+        assert!(cli.sort_size);
+        assert_eq!(cli.download_category.as_deref(), Some("Minsk"));
+        assert!(cli.recursive);
+        assert_eq!(cli.output_dir, std::path::PathBuf::from("out"));
+        assert!(cli.preview);
+        assert!(cli.play_audio);
+    }
+
+    #[tokio::test]
+    async fn preview_images_ignores_empty_and_non_image_results() {
+        preview_images(&[]).await.unwrap();
+        preview_images(&[FileHit {
+            mime: Some("audio/ogg".into()),
+            ..FileHit::default()
+        }])
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn play_audio_reports_missing_audio_and_missing_url() {
+        let error = play_audio(&[]).await.unwrap_err();
+        assert!(error.to_string().contains("no audio file"));
+
+        let error = play_audio(&[FileHit {
+            mime: Some("audio/ogg".into()),
+            ..FileHit::default()
+        }])
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("audio file has no URL"));
     }
 }

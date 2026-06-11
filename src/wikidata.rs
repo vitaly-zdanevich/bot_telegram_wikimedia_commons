@@ -782,4 +782,271 @@ mod tests {
             Some("https://example.com/search?id=a%20b%2F1".to_string())
         );
     }
+
+    #[test]
+    fn special_snak_values_render_placeholders() {
+        assert_eq!(
+            render_wikidata_snak_value(
+                "P1",
+                &WikidataSnak {
+                    datatype: None,
+                    snaktype: Some("somevalue".into()),
+                    datavalue: None,
+                },
+                &HashMap::new(),
+                &HashMap::new(),
+            )
+            .as_deref(),
+            Some("some value")
+        );
+        assert_eq!(
+            render_wikidata_snak_value(
+                "P1",
+                &WikidataSnak {
+                    datatype: None,
+                    snaktype: Some("novalue".into()),
+                    datavalue: None,
+                },
+                &HashMap::new(),
+                &HashMap::new(),
+            )
+            .as_deref(),
+            Some("no value")
+        );
+        assert!(
+            render_wikidata_snak_value(
+                "P1",
+                &WikidataSnak {
+                    datatype: None,
+                    snaktype: Some("bad".into()),
+                    datavalue: None,
+                },
+                &HashMap::new(),
+                &HashMap::new(),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn object_values_render_coordinates_time_quantity_and_monolingual_text() {
+        let mut labels = HashMap::new();
+        labels.insert(
+            "Q11573".into(),
+            WikidataLabelInfo {
+                label: Some("metre".into()),
+                description: None,
+            },
+        );
+
+        let coordinate = render_wikidata_snak_value(
+            "P625",
+            &WikidataSnak {
+                datatype: Some("globe-coordinate".into()),
+                snaktype: Some("value".into()),
+                datavalue: Some(WikidataDataValue {
+                    value: serde_json::json!({"latitude": 53.9, "longitude": 27.56}),
+                }),
+            },
+            &labels,
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert!(coordinate.contains("openstreetmap.org/?mlat=53.9"));
+
+        assert_eq!(
+            render_wikidata_snak_value(
+                "P585",
+                &WikidataSnak {
+                    datatype: Some("time".into()),
+                    snaktype: Some("value".into()),
+                    datavalue: Some(WikidataDataValue {
+                        value: serde_json::json!({"time": "+2025-12-00T00:00:00Z"}),
+                    }),
+                },
+                &labels,
+                &HashMap::new(),
+            )
+            .as_deref(),
+            Some("2025-12")
+        );
+
+        let quantity = render_wikidata_snak_value(
+            "P2048",
+            &WikidataSnak {
+                datatype: Some("quantity".into()),
+                snaktype: Some("value".into()),
+                datavalue: Some(WikidataDataValue {
+                    value: serde_json::json!({
+                        "amount": "+12.5",
+                        "unit": "http://www.wikidata.org/entity/Q11573"
+                    }),
+                }),
+            },
+            &labels,
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert!(quantity.contains("12.5"));
+        assert!(quantity.contains("metre (Q11573)"));
+
+        assert_eq!(
+            render_wikidata_snak_value(
+                "P1476",
+                &WikidataSnak {
+                    datatype: Some("monolingualtext".into()),
+                    snaktype: Some("value".into()),
+                    datavalue: Some(WikidataDataValue {
+                        value: serde_json::json!({"text": "Minsk", "language": "en"}),
+                    }),
+                },
+                &labels,
+                &HashMap::new(),
+            )
+            .as_deref(),
+            Some("Minsk (en)")
+        );
+    }
+
+    #[test]
+    fn media_and_plain_string_values_are_rendered_safely() {
+        assert_eq!(
+            render_wikidata_snak_value(
+                "P18",
+                &WikidataSnak {
+                    datatype: Some("commonsMedia".into()),
+                    snaktype: Some("value".into()),
+                    datavalue: Some(WikidataDataValue {
+                        value: Value::String("City Hall.jpg".into()),
+                    }),
+                },
+                &HashMap::new(),
+                &HashMap::new(),
+            )
+            .as_deref(),
+            Some(
+                "<a href=\"https://commons.wikimedia.org/wiki/File%3ACity_Hall.jpg\">City Hall.jpg</a>"
+            )
+        );
+        assert_eq!(
+            render_wikidata_snak_value(
+                "P1",
+                &WikidataSnak {
+                    datatype: Some("string".into()),
+                    snaktype: Some("value".into()),
+                    datavalue: Some(WikidataDataValue {
+                        value: Value::String("<unsafe>".into()),
+                    }),
+                },
+                &HashMap::new(),
+                &HashMap::new(),
+            )
+            .as_deref(),
+            Some("&lt;unsafe&gt;")
+        );
+    }
+
+    #[test]
+    fn normalizes_ids_language_and_localized_values() {
+        assert_eq!(normalize_wikidata_entity_id(" q42 "), Some("Q42".into()));
+        assert_eq!(normalize_wikidata_entity_id("p123"), Some("P123".into()));
+        assert_eq!(normalize_wikidata_entity_id("x123"), None);
+        assert_eq!(normalize_language_code("BE-tarask"), "be-tarask");
+        assert_eq!(normalize_language_code("bad_underscore"), "en");
+
+        let mut values = HashMap::new();
+        values.insert(
+            "en".into(),
+            WikidataLocalizedValue {
+                value: "English".into(),
+            },
+        );
+        values.insert(
+            "be".into(),
+            WikidataLocalizedValue {
+                value: "Belarusian".into(),
+            },
+        );
+
+        assert_eq!(
+            wikidata_localized_entity_value(Some(&values), "be").as_deref(),
+            Some("Belarusian")
+        );
+        assert_eq!(
+            wikidata_localized_entity_value(Some(&values), "de").as_deref(),
+            Some("English")
+        );
+    }
+
+    #[test]
+    fn entity_ids_and_formatter_urls_are_extracted() {
+        assert_eq!(
+            wikidata_entity_id_from_value(&serde_json::json!({
+                "entity-type": "property",
+                "numeric-id": 625
+            })),
+            Some("P625".into())
+        );
+        assert_eq!(
+            wikidata_entity_id_from_url("http://www.wikidata.org/entity/Q11573"),
+            Some("Q11573".into())
+        );
+        assert_eq!(
+            wikidata_quantity_unit_id(&serde_json::json!({
+                "unit": "http://www.wikidata.org/entity/Q11573"
+            })),
+            Some("Q11573".into())
+        );
+
+        let entity = WikidataEntity {
+            labels: None,
+            descriptions: None,
+            claims: Some(HashMap::from([(
+                "P1630".into(),
+                vec![WikidataClaim {
+                    mainsnak: WikidataSnak {
+                        datatype: Some("string".into()),
+                        snaktype: Some("value".into()),
+                        datavalue: Some(WikidataDataValue {
+                            value: Value::String("https://example.test/$1".into()),
+                        }),
+                    },
+                }],
+            )])),
+        };
+
+        assert_eq!(
+            wikidata_formatter_url_from_entity(&entity).as_deref(),
+            Some("https://example.test/$1")
+        );
+    }
+
+    #[test]
+    fn claim_rendering_respects_message_budget_and_more_counts() {
+        let claims = WikidataClaims {
+            item: "Q1".into(),
+            label: None,
+            description: None,
+            property_count: 2,
+            properties: vec![
+                WikidataPropertyClaims {
+                    property_id: "P1".into(),
+                    property_label: "P1".into(),
+                    total_values: 3,
+                    values: vec!["A".into()],
+                },
+                WikidataPropertyClaims {
+                    property_id: "P2".into(),
+                    property_label: "second".into(),
+                    total_values: 1,
+                    values: vec!["B".repeat(200)],
+                },
+            ],
+        };
+
+        let rendered = render_wikidata_claims_html(&claims, 180);
+
+        assert!(rendered.contains("+2 more"));
+        assert!(rendered.contains("Shown first 1 of 2 properties."));
+    }
 }

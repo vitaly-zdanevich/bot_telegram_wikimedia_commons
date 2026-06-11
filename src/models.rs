@@ -499,3 +499,117 @@ impl CategoryInfo {
             .map(|id| format!("https://www.wikidata.org/wiki/{id}"))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CategoryInfo, Coordinates, DateFilter, DeliveryMode, DocumentPageMode, FileHit, FileType,
+        SearchQuery, normalize_inline_result_count,
+    };
+
+    #[test]
+    fn parses_file_type_preferences_and_cirrus_predicates() {
+        assert_eq!(FileType::parse("all"), Some(FileType::All));
+        assert_eq!(FileType::parse("sound"), Some(FileType::Audio));
+        assert_eq!(FileType::parse("videos"), Some(FileType::Video));
+        assert_eq!(FileType::parse("bad"), None);
+        assert_eq!(FileType::All.cirrus_filetype(), None);
+        assert_eq!(FileType::Images.cirrus_filetype(), Some("bitmap"));
+        assert_eq!(FileType::Audio.as_pref_value(), "audio");
+    }
+
+    #[test]
+    fn parses_delivery_and_document_modes() {
+        assert_eq!(DeliveryMode::parse("links"), Some(DeliveryMode::Links10));
+        assert_eq!(DeliveryMode::parse("img10"), Some(DeliveryMode::Images10));
+        assert_eq!(
+            DeliveryMode::parse("images20"),
+            Some(DeliveryMode::Images20)
+        );
+        assert_eq!(DeliveryMode::parse("unknown"), None);
+        assert_eq!(DeliveryMode::Buttons.as_pref_value(), "buttons");
+        assert_eq!(
+            DocumentPageMode::parse("pages"),
+            Some(DocumentPageMode::RenderedPages)
+        );
+        assert_eq!(DocumentPageMode::Original.as_pref_value(), "original");
+    }
+
+    #[test]
+    fn normalizes_inline_count_values() {
+        assert_eq!(normalize_inline_result_count(10), 10);
+        assert_eq!(normalize_inline_result_count(20), 20);
+        assert_eq!(normalize_inline_result_count(50), 50);
+        assert_eq!(normalize_inline_result_count(11), 50);
+    }
+
+    #[test]
+    fn formats_date_filters_and_terms() {
+        assert_eq!(DateFilter::Year(2025).to_string(), "2025");
+        assert_eq!(
+            DateFilter::Day("2025-12-31".into()).to_string(),
+            "2025-12-31"
+        );
+        assert_eq!(DateFilter::RelativeDays(7).to_string(), "7days");
+        assert_eq!(DateFilter::PreviousMonth.to_string(), "month");
+        assert_eq!(DateFilter::PreviousYear.to_string(), "year");
+        assert_eq!(
+            SearchQuery {
+                terms: vec!["New".into(), "York".into()],
+                ..SearchQuery::default()
+            }
+            .term_text(),
+            "New York"
+        );
+    }
+
+    #[test]
+    fn file_helpers_detect_extensions_audio_documents_and_history() {
+        let file = FileHit {
+            page_id: 7,
+            title: "File:Sound.OGG".into(),
+            file_name: "Sound.OGG".into(),
+            media_type: Some("AUDIO".into()),
+            ..FileHit::default()
+        };
+
+        assert_eq!(file.extension().as_deref(), Some("ogg"));
+        assert!(file.is_audio());
+        assert!(!file.is_paginated_document());
+        assert_eq!(
+            file.history_url().as_deref(),
+            Some("https://commons.wikimedia.org/w/index.php?title=File%3ASound.OGG&action=history")
+        );
+
+        let pdf = FileHit {
+            file_name: "Book.pdf".into(),
+            ..FileHit::default()
+        };
+        assert!(pdf.is_paginated_document());
+        assert_eq!(
+            pdf.history_url().as_deref(),
+            Some("https://commons.wikimedia.org/w/index.php?title=File%3ABook.pdf&action=history")
+        );
+    }
+
+    #[test]
+    fn coordinates_and_category_links_are_clickable() {
+        assert_eq!(
+            Coordinates {
+                lat: 53.9023,
+                lon: 27.5619,
+            }
+            .openstreetmap_url(),
+            "https://www.openstreetmap.org/?mlat=53.902300&mlon=27.561900#map=15/53.902300/27.561900"
+        );
+        assert_eq!(
+            CategoryInfo {
+                wikidata_item: Some("Q2280".into()),
+                ..CategoryInfo::default()
+            }
+            .wikidata_url()
+            .as_deref(),
+            Some("https://www.wikidata.org/wiki/Q2280")
+        );
+    }
+}

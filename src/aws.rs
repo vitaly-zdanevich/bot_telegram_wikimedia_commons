@@ -241,7 +241,7 @@ fn hmac_hex(key: &[u8], msg: &[u8]) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{json_canonical_headers, sha256_hex};
+    use super::{hmac_hex, json_canonical_headers, sha256_hex, signing_key};
 
     #[test]
     fn sha256_hex_matches_known_value() {
@@ -268,6 +268,43 @@ mod tests {
         assert!(
             canonical_headers.find("x-amz-security-token").unwrap()
                 < canonical_headers.find("x-amz-target").unwrap()
+        );
+    }
+
+    #[test]
+    fn json_headers_without_session_token_omit_security_token() {
+        let (canonical_headers, signed_headers) = json_canonical_headers(
+            "application/x-amz-json-1.0",
+            "dynamodb.us-east-1.amazonaws.com",
+            "20260611T000000Z",
+            "DynamoDB_20120810.GetItem",
+            None,
+        );
+
+        assert_eq!(signed_headers, "content-type;host;x-amz-date;x-amz-target");
+        assert!(canonical_headers.contains("content-type:application/x-amz-json-1.0\n"));
+        assert!(canonical_headers.contains("host:dynamodb.us-east-1.amazonaws.com\n"));
+        assert!(!canonical_headers.contains("x-amz-security-token"));
+    }
+
+    #[test]
+    fn hmac_helpers_are_stable() {
+        assert_eq!(
+            hmac_hex(b"key", b"The quick brown fox jumps over the lazy dog").unwrap(),
+            "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"
+        );
+
+        let key = signing_key(
+            "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+            "20120215",
+            "us-east-1",
+            "iam",
+        )
+        .unwrap();
+        assert_eq!(key.len(), 32);
+        assert_ne!(
+            hex::encode(key),
+            hex::encode("wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY")
         );
     }
 }

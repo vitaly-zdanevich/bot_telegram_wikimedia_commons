@@ -1153,14 +1153,43 @@ fn yes_no(value: bool) -> &'static str {
 mod tests {
     use super::{
         ExtensionGroup, PreferencesView, apply_preference_callback, category_result_limit,
-        file_result_limit, help_text, inline_location_applies, inline_lookup_limit,
-        inline_result_page, is_expired_inline_query_error, is_preferences_update_command,
-        parse_inline_offset, parse_pagination_callback, preferences_keyboard, update_preferences,
+        checked_label, extension_group_for, file_result_limit, format_preferences, help_text,
+        inline_location_applies, inline_lookup_limit, inline_result_page,
+        is_expired_inline_query_error, is_preferences_update_command, parse_inline_offset,
+        parse_pagination_callback, preferences_keyboard, toggle_label, update_preferences,
     };
     use crate::config::Config;
     use crate::models::{
-        DeliveryMode, FileHit, FileType, Preferences, SearchQuery, SizeFilter, SizeOp,
+        DeliveryMode, DocumentPageMode, FileHit, FileType, Preferences, SearchQuery, SizeFilter,
+        SizeOp,
     };
+
+    fn test_config(stateless_mode: bool) -> Config {
+        Config {
+            telegram_bot_token: None,
+            telegram_webhook_secret: None,
+            admin_user_ids: vec![42],
+            github_url: "https://github.com/vitaly-zdanevich/bot_telegram_wikimedia_commons".into(),
+            aws_region: "us-east-1".into(),
+            lambda_function_name: "telegram-wikimedia-commons-bot".into(),
+            dynamodb_table: Some("telegram-wikimedia-commons-bot-preferences".into()),
+            stateless_mode,
+            max_file_bytes: 50 * 1024 * 1024,
+            user_agent: "test-agent".into(),
+            commons_api_url: "https://commons.wikimedia.org/w/api.php".into(),
+            commons_auth_cookie_ssm_parameter: None,
+            enable_test_endpoint: false,
+        }
+    }
+
+    fn keyboard_labels(keyboard: &crate::telegram::InlineKeyboardMarkup) -> Vec<&str> {
+        keyboard
+            .inline_keyboard
+            .iter()
+            .flatten()
+            .map(|button| button.text.as_str())
+            .collect()
+    }
 
     #[test]
     fn updates_preferences_from_command() {
@@ -1183,6 +1212,55 @@ mod tests {
     }
 
     #[test]
+    fn updates_list_preferences_from_commands() {
+        let prefs = update_preferences(
+            "/settings favorite add Belarusian wooden churches",
+            Preferences::default(),
+        );
+        assert_eq!(
+            prefs.favorite_categories,
+            vec!["Belarusian wooden churches"]
+        );
+        let prefs = update_preferences(
+            "/settings favorite remove Belarusian wooden churches",
+            prefs,
+        );
+        assert!(prefs.favorite_categories.is_empty());
+
+        let prefs = update_preferences(
+            "/settings blacklist-category add Bad scans",
+            Preferences::default(),
+        );
+        assert_eq!(prefs.blacklist_categories, vec!["Bad scans"]);
+        let prefs = update_preferences("/settings blacklist-category remove Bad scans", prefs);
+        assert!(prefs.blacklist_categories.is_empty());
+
+        let prefs = update_preferences(
+            "/settings blacklist-user add Example_User",
+            Preferences::default(),
+        );
+        assert_eq!(prefs.blacklist_uploaders, vec!["Example_User"]);
+        let prefs = update_preferences("/settings blacklist-user remove Example_User", prefs);
+        assert!(prefs.blacklist_uploaders.is_empty());
+
+        let prefs = update_preferences("/settings category-counts on", Preferences::default());
+        assert!(prefs.show_category_counts);
+        let prefs = update_preferences("/settings filesize on", prefs);
+        assert!(prefs.show_file_size);
+        let prefs = update_preferences("/settings metadata off", prefs);
+        assert!(!prefs.show_preview_metadata);
+
+        let prefs = update_preferences(
+            "/settings ext off",
+            Preferences {
+                extension: Some("jpg".into()),
+                ..Preferences::default()
+            },
+        );
+        assert_eq!(prefs.extension, None);
+    }
+
+    #[test]
     fn recognizes_settings_update_command() {
         assert!(is_preferences_update_command("/settings mode links10"));
         assert!(is_preferences_update_command("/prefs mode links10"));
@@ -1191,7 +1269,7 @@ mod tests {
 
     #[test]
     fn help_formats_search_examples_as_code() {
-        let text = help_text(&Config::from_env(), &Preferences::default());
+        let text = help_text(&test_config(false), &Preferences::default());
         assert!(
             text.contains("https://github.com/vitaly-zdanevich/bot_telegram_wikimedia_commons")
         );
@@ -1199,6 +1277,19 @@ mod tests {
         assert!(text.contains("Support: @vitaly_zdanevich"));
         assert!(text.contains("Search examples:\n<pre>Minsk"));
         assert!(text.contains("Катэгорыя Мінск</pre>"));
+    }
+
+    #[test]
+    fn help_lists_favorite_categories_when_configured() {
+        let text = help_text(
+            &test_config(false),
+            &Preferences {
+                favorite_categories: vec!["Minsk".into(), "Brest Fortress".into()],
+                ..Preferences::default()
+            },
+        );
+
+        assert!(text.contains("Favorite categories: Minsk, Brest Fortress"));
     }
 
     #[test]
@@ -1304,12 +1395,7 @@ mod tests {
             ..Preferences::default()
         };
         let keyboard = preferences_keyboard(&prefs, PreferencesView::Main);
-        let labels = keyboard
-            .inline_keyboard
-            .iter()
-            .flatten()
-            .map(|button| button.text.as_str())
-            .collect::<Vec<_>>();
+        let labels = keyboard_labels(&keyboard);
         assert!(labels.contains(&"✅ Links10"));
         assert!(labels.contains(&"✅ Images"));
         assert!(labels.contains(&"✅ SHA-1"));
@@ -1317,6 +1403,31 @@ mod tests {
         assert!(labels.contains(&"✅ Pagination"));
         assert!(labels.contains(&"✅ Inline 50"));
         assert!(labels.contains(&"Extension: webp"));
+    }
+
+    #[test]
+    fn renders_extension_keyboards_with_group_checks() {
+        let prefs = Preferences {
+            extension: Some("flac".into()),
+            ..Preferences::default()
+        };
+
+        let menu = preferences_keyboard(&prefs, PreferencesView::ExtensionMenu);
+        let menu_labels = keyboard_labels(&menu);
+        assert!(menu_labels.contains(&"All extensions"));
+        assert!(menu_labels.contains(&"Images"));
+        assert!(menu_labels.contains(&"✅ Audio"));
+        assert!(menu_labels.contains(&"Documents"));
+        assert!(menu_labels.contains(&"Back"));
+
+        let group = preferences_keyboard(
+            &prefs,
+            PreferencesView::ExtensionGroup(ExtensionGroup::Audio),
+        );
+        let group_labels = keyboard_labels(&group);
+        assert!(group_labels.contains(&"✅ flac"));
+        assert!(group_labels.contains(&"Clear extension"));
+        assert!(group_labels.contains(&"Main"));
     }
 
     #[test]
@@ -1329,6 +1440,16 @@ mod tests {
             PreferencesView::ExtensionGroup(ExtensionGroup::Images)
         );
         assert!(apply_preference_callback("ext:set:avif", Preferences::default()).is_none());
+    }
+
+    #[test]
+    fn extension_groups_map_supported_extensions() {
+        assert_eq!(extension_group_for("jpg"), Some(ExtensionGroup::Images));
+        assert_eq!(extension_group_for("flac"), Some(ExtensionGroup::Audio));
+        assert_eq!(extension_group_for("webm"), Some(ExtensionGroup::Video));
+        assert_eq!(extension_group_for("pdf"), Some(ExtensionGroup::Documents));
+        assert_eq!(extension_group_for("stl"), Some(ExtensionGroup::Other));
+        assert_eq!(extension_group_for("avif"), None);
     }
 
     #[test]
@@ -1349,11 +1470,82 @@ mod tests {
     }
 
     #[test]
+    fn applies_more_preference_callbacks() {
+        let result =
+            apply_preference_callback("toggle:category-counts", Preferences::default()).unwrap();
+        assert!(result.changed);
+        assert!(result.preferences.show_category_counts);
+
+        let result = apply_preference_callback("toggle:sha1", Preferences::default()).unwrap();
+        assert!(result.changed);
+        assert!(result.preferences.show_sha1);
+
+        let result = apply_preference_callback("toggle:filesize", Preferences::default()).unwrap();
+        assert!(result.changed);
+        assert!(result.preferences.show_file_size);
+
+        let result = apply_preference_callback("mode:images10", Preferences::default()).unwrap();
+        assert_eq!(result.preferences.delivery_mode, DeliveryMode::Images10);
+
+        let result = apply_preference_callback("type:video", Preferences::default()).unwrap();
+        assert_eq!(result.preferences.file_type, FileType::Video);
+
+        let result = apply_preference_callback("pdf:rendered", Preferences::default()).unwrap();
+        assert_eq!(result.preferences.pdf_mode, DocumentPageMode::RenderedPages);
+
+        let result = apply_preference_callback("djvu:rendered", Preferences::default()).unwrap();
+        assert_eq!(
+            result.preferences.djvu_mode,
+            DocumentPageMode::RenderedPages
+        );
+
+        let result =
+            apply_preference_callback("ext:group:documents", Preferences::default()).unwrap();
+        assert!(!result.changed);
+        assert_eq!(
+            result.view,
+            PreferencesView::ExtensionGroup(ExtensionGroup::Documents)
+        );
+
+        let result = apply_preference_callback(
+            "ext:set:jpg",
+            Preferences {
+                extension: Some("jpg".into()),
+                ..Preferences::default()
+            },
+        )
+        .unwrap();
+        assert!(!result.changed);
+        assert!(!result.render);
+
+        assert!(apply_preference_callback("mode:bad", Preferences::default()).is_none());
+    }
+
+    #[test]
     fn applies_inline_count_callback() {
         let result = apply_preference_callback("inline:10", Preferences::default()).unwrap();
 
         assert!(result.changed);
         assert_eq!(result.preferences.inline_result_count, 10);
+    }
+
+    #[test]
+    fn noops_preference_callback_when_value_is_already_selected() {
+        let result = apply_preference_callback(
+            "inline:20",
+            Preferences {
+                inline_result_count: 20,
+                ..Preferences::default()
+            },
+        )
+        .unwrap();
+        assert!(!result.changed);
+        assert!(!result.render);
+
+        let result = apply_preference_callback("ext:off", Preferences::default()).unwrap();
+        assert!(!result.changed);
+        assert!(!result.render);
+        assert_eq!(result.view, PreferencesView::ExtensionMenu);
     }
 
     #[test]
@@ -1386,5 +1578,43 @@ mod tests {
             20
         );
         assert_eq!(category_result_limit(&no_pagination), 20);
+    }
+
+    #[test]
+    fn formats_preferences_with_storage_lists_and_commands() {
+        let text = format_preferences(
+            &Preferences {
+                show_category_counts: true,
+                delivery_mode: DeliveryMode::Images20,
+                file_type: FileType::Audio,
+                extension: Some("flac".into()),
+                favorite_categories: vec!["Minsk".into()],
+                blacklist_categories: vec!["Low quality scans".into()],
+                blacklist_uploaders: vec!["Example_User".into()],
+                show_sha1: true,
+                show_file_size: true,
+                inline_result_count: 10,
+                ..Preferences::default()
+            },
+            &test_config(true),
+        );
+
+        assert!(text.contains("Preferences (stateless mode, not saved)"));
+        assert!(text.contains("Mode: images20"));
+        assert!(text.contains("File type: audio"));
+        assert!(text.contains("Extension: flac"));
+        assert!(text.contains("Inline results: 10"));
+        assert!(text.contains("Favorites: Minsk"));
+        assert!(text.contains("Category blacklist: Low quality scans"));
+        assert!(text.contains("Uploader blacklist: Example_User"));
+        assert!(text.contains("/settings inline 10|20|50"));
+    }
+
+    #[test]
+    fn labels_show_checks_only_when_selected() {
+        assert_eq!(checked_label(true, "Images"), "✅ Images");
+        assert_eq!(checked_label(false, "Images"), "Images");
+        assert_eq!(toggle_label(true, "Pagination"), "✅ Pagination");
+        assert_eq!(toggle_label(false, "Pagination"), "Pagination");
     }
 }

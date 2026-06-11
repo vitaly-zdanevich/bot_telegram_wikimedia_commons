@@ -1,6 +1,6 @@
 [package]
 name = "telegram-wikimedia-commons-bot"
-version = "0.0.10"
+version = "0.0.11"
 edition = "2024"
 license = "MIT"
 description = "Telegram and CLI bot for searching and reading Wikimedia Commons media."

@@ -509,7 +509,14 @@ fn disk_cache_path(key: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{FileBytesCache, bounded_insert};
+    use super::{
+        FileBytesCache, bounded_insert, cached_category_file_count, cached_category_info,
+        cached_category_search, cached_file_search, cached_files_by_page_id, cached_files_by_title,
+        cached_page_title, file_bytes_cache_key, file_search_cache_key, put_file_search_cache,
+        remember_category_file_count, remember_category_info, remember_category_search,
+        remember_files, remember_page_title,
+    };
+    use crate::models::{CategoryHit, CategoryInfo, FileHit, Preferences, SearchQuery};
     use bytes::Bytes;
     use std::collections::HashMap;
 
@@ -536,5 +543,134 @@ mod tests {
         assert_eq!(cache.total_bytes, 5);
         assert_eq!(cache.get("c").as_deref(), Some(&b"abcde"[..]));
         assert!(cache.get("huge").is_none());
+    }
+
+    #[test]
+    fn file_byte_keys_prefer_stable_identifiers() {
+        assert_eq!(
+            file_bytes_cache_key(
+                &FileHit {
+                    sha1: Some("abc".into()),
+                    page_id: 1,
+                    ..FileHit::default()
+                },
+                "https://example.test/a.jpg"
+            ),
+            "sha1:abc"
+        );
+        assert_eq!(
+            file_bytes_cache_key(
+                &FileHit {
+                    page_id: 9,
+                    ..FileHit::default()
+                },
+                "https://example.test/a.jpg"
+            ),
+            "page:9:https://example.test/a.jpg"
+        );
+        assert_eq!(
+            file_bytes_cache_key(&FileHit::default(), "https://example.test/a.jpg"),
+            "url:https://example.test/a.jpg"
+        );
+    }
+
+    #[test]
+    fn file_search_cache_key_includes_preferences_and_limits() {
+        let key = file_search_cache_key(
+            "search",
+            &SearchQuery {
+                terms: vec!["Minsk".into()],
+                ..SearchQuery::default()
+            },
+            &Preferences {
+                show_sha1: true,
+                ..Preferences::default()
+            },
+            20,
+            50,
+        );
+
+        assert!(key.contains("search"));
+        assert!(key.contains("Minsk"));
+        assert!(key.contains("show_sha1: true"));
+        assert!(key.ends_with(":20:50"));
+    }
+
+    #[tokio::test]
+    async fn remembers_files_and_preserves_lookup_order() {
+        let files = vec![
+            FileHit {
+                page_id: 1,
+                title: "File:A.jpg".into(),
+                file_name: "A.jpg".into(),
+                ..FileHit::default()
+            },
+            FileHit {
+                page_id: 2,
+                title: "File:B.jpg".into(),
+                file_name: "B.jpg".into(),
+                ..FileHit::default()
+            },
+        ];
+        remember_files(&files).await;
+
+        let (by_id, missing_ids) = cached_files_by_page_id(&[2, 1, 99]).await;
+        assert_eq!(by_id[0].as_ref().unwrap().file_name, "B.jpg");
+        assert_eq!(by_id[1].as_ref().unwrap().file_name, "A.jpg");
+        assert_eq!(missing_ids, vec![(2, 99)]);
+
+        let titles = vec!["File:B.jpg".into(), "File:Missing.jpg".into()];
+        let (by_title, missing_titles) = cached_files_by_title(&titles).await;
+        assert_eq!(by_title[0].as_ref().unwrap().page_id, 2);
+        assert_eq!(missing_titles, vec![(1, "File:Missing.jpg".into())]);
+    }
+
+    #[tokio::test]
+    async fn remembers_search_category_info_counts_and_page_titles() {
+        put_file_search_cache(
+            "file-search".into(),
+            vec![FileHit {
+                page_id: 10,
+                ..FileHit::default()
+            }],
+        )
+        .await;
+        remember_category_search(
+            "category-search".into(),
+            vec![CategoryHit {
+                page_id: 20,
+                title: "Category:Minsk".into(),
+                ..CategoryHit::default()
+            }],
+        )
+        .await;
+        remember_category_info(
+            "Category:Minsk".into(),
+            CategoryInfo {
+                title: "Category:Minsk".into(),
+                ..CategoryInfo::default()
+            },
+        )
+        .await;
+        remember_category_file_count("Category:Minsk".into(), 42).await;
+        remember_page_title(100, Some("File:Known.jpg".into())).await;
+
+        assert_eq!(
+            cached_file_search("file-search").await.unwrap()[0].page_id,
+            10
+        );
+        assert_eq!(
+            cached_category_search("category-search").await.unwrap()[0].title,
+            "Category:Minsk"
+        );
+        assert_eq!(
+            cached_category_info("Category:Minsk").await.unwrap().title,
+            "Category:Minsk"
+        );
+        assert_eq!(cached_category_file_count("Category:Minsk").await, Some(42));
+        assert_eq!(
+            cached_page_title(100).await,
+            Some(Some("File:Known.jpg".into()))
+        );
     }
 }
