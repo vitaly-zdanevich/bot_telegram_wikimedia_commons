@@ -120,6 +120,7 @@ fn item_to_preferences(item: &Value) -> Preferences {
         show_sha1: attr_bool(item, "show_sha1").unwrap_or(false),
         show_file_size: attr_bool(item, "show_file_size").unwrap_or(false),
         show_preview_metadata: attr_bool(item, "show_preview_metadata").unwrap_or(true),
+        pagination_enabled: attr_bool(item, "pagination_enabled").unwrap_or(true),
         pdf_mode: attr_string(item, "pdf_mode")
             .and_then(|value| DocumentPageMode::parse(&value))
             .unwrap_or_default(),
@@ -144,6 +145,7 @@ fn preferences_to_item(telegram_user_id: i64, preferences: &Preferences) -> Valu
         "show_sha1": {"BOOL": preferences.show_sha1},
         "show_file_size": {"BOOL": preferences.show_file_size},
         "show_preview_metadata": {"BOOL": preferences.show_preview_metadata},
+        "pagination_enabled": {"BOOL": preferences.pagination_enabled},
         "pdf_mode": {"S": preferences.pdf_mode.as_pref_value()},
         "djvu_mode": {"S": preferences.djvu_mode.as_pref_value()},
     })
@@ -189,6 +191,7 @@ mod tests {
             favorite_categories: vec!["Minsk".into()],
             show_sha1: true,
             show_preview_metadata: false,
+            pagination_enabled: false,
             ..Preferences::default()
         };
         let item = preferences_to_item(42, &prefs);
@@ -200,14 +203,17 @@ mod tests {
         assert_eq!(parsed.favorite_categories, vec!["Minsk"]);
         assert!(parsed.show_sha1);
         assert!(!parsed.show_preview_metadata);
+        assert!(!parsed.pagination_enabled);
     }
 
     #[test]
-    fn old_preferences_default_to_preview_metadata_enabled() {
+    fn old_preferences_default_to_new_enabled_flags() {
         let item = json!({
             "pk": {"S": "USER#42"},
             "sk": {"S": "PREFERENCES"}
         });
-        assert!(item_to_preferences(&item).show_preview_metadata);
+        let preferences = item_to_preferences(&item);
+        assert!(preferences.show_preview_metadata);
+        assert!(preferences.pagination_enabled);
     }
 }

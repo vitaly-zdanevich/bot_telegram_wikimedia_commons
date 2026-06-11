@@ -2,6 +2,7 @@ use crate::commons::CommonsClient;
 use crate::models::{
     CategoryHit, CategoryInfo, DeliveryMode, FileHit, Preferences, TELEGRAM_REMOTE_URL_LIMIT_BYTES,
 };
+use crate::pagination::{BUTTON_PAGE_SIZE, page_count, store_category_list, store_file_list};
 use anyhow::{Context, Result, bail};
 use reqwest::{Client, multipart};
 use serde::{Deserialize, Serialize};
@@ -158,7 +159,7 @@ impl TelegramClient {
         Ok(())
     }
 
-    /// Sends file result buttons for up to twenty Commons files.
+    /// Sends file result buttons, adding in-place pagination when enabled.
     pub async fn send_file_buttons(
         &self,
         chat_id: i64,
@@ -169,10 +170,16 @@ impl TelegramClient {
             self.send_message(chat_id, "No files found.", None).await?;
             return Ok(());
         }
-        let buttons = file_buttons(files, preferences);
+        let total_pages = page_count(files.len());
+        let token = if preferences.pagination_enabled && files.len() > BUTTON_PAGE_SIZE {
+            Some(store_file_list(files).await)
+        } else {
+            None
+        };
+        let buttons = file_buttons_page(files, preferences, token.as_deref(), 0, total_pages);
         self.send_message(
             chat_id,
-            "Files",
+            &paginated_title("Files", 0, total_pages),
             Some(InlineKeyboardMarkup {
                 inline_keyboard: buttons,
             }),
@@ -185,13 +192,14 @@ impl TelegramClient {
         &self,
         chat_id: i64,
         categories: &[CategoryHit],
+        pagination_enabled: bool,
     ) -> Result<()> {
         if categories.is_empty() {
             self.send_message(chat_id, "No categories found.", None)
                 .await?;
             return Ok(());
         }
-        self.send_category_buttons_with_title(chat_id, "Categories", categories)
+        self.send_category_buttons_with_title(chat_id, "Categories", categories, pagination_enabled)
             .await
     }
 
@@ -201,24 +209,19 @@ impl TelegramClient {
         chat_id: i64,
         title: &str,
         categories: &[CategoryHit],
+        pagination_enabled: bool,
     ) -> Result<()> {
-        let rows = categories
-            .chunks(1)
-            .map(|chunk| {
-                chunk
-                    .iter()
-                    .map(|category| InlineKeyboardButton {
-                        text: category_button_label(category),
-                        callback_data: Some(format!("cat:{}", category.page_id)),
-                        url: None,
-                        style: None,
-                    })
-                    .collect()
-            })
-            .collect();
+        let total_pages = page_count(categories.len());
+        let token = if pagination_enabled && categories.len() > BUTTON_PAGE_SIZE {
+            Some(store_category_list(categories).await)
+        } else {
+            None
+        };
+        let page_kind = if title == "Subcategories" { "s" } else { "c" };
+        let rows = category_buttons_page(categories, token.as_deref(), 0, total_pages, page_kind);
         self.send_message(
             chat_id,
-            title,
+            &paginated_title(title, 0, total_pages),
             Some(InlineKeyboardMarkup {
                 inline_keyboard: rows,
             }),
@@ -231,14 +234,20 @@ impl TelegramClient {
         &self,
         chat_id: i64,
         categories: &[CategoryHit],
+        pagination_enabled: bool,
     ) -> Result<()> {
         if categories.is_empty() {
             self.send_message(chat_id, "No subcategories found.", None)
                 .await?;
             return Ok(());
         }
-        self.send_category_buttons_with_title(chat_id, "Subcategories", categories)
-            .await
+        self.send_category_buttons_with_title(
+            chat_id,
+            "Subcategories",
+            categories,
+            pagination_enabled,
+        )
+        .await
     }
 
     /// Sends a compact list of plain file links.
@@ -596,9 +605,20 @@ pub fn file_buttons(
     files: &[FileHit],
     preferences: &Preferences,
 ) -> Vec<Vec<InlineKeyboardButton>> {
-    files
+    file_buttons_page(files, preferences, None, 0, 1)
+}
+
+/// Creates one page of file callback buttons and optional pagination controls.
+pub fn file_buttons_page(
+    files: &[FileHit],
+    preferences: &Preferences,
+    page_token: Option<&str>,
+    page_index: usize,
+    total_pages: usize,
+) -> Vec<Vec<InlineKeyboardButton>> {
+    let mut rows = files
         .iter()
-        .take(20)
+        .take(BUTTON_PAGE_SIZE)
         .map(|file| {
             vec![InlineKeyboardButton {
                 text: file_button_label(file, preferences),
@@ -607,7 +627,77 @@ pub fn file_buttons(
                 style: file_button_style(file),
             }]
         })
-        .collect()
+        .collect::<Vec<_>>();
+    if let Some(token) = page_token
+        && total_pages > 1
+    {
+        rows.push(pagination_row("f", token, page_index, total_pages));
+    }
+    rows
+}
+
+/// Creates one page of category callback buttons and optional pagination controls.
+pub fn category_buttons_page(
+    categories: &[CategoryHit],
+    page_token: Option<&str>,
+    page_index: usize,
+    total_pages: usize,
+    page_kind: &str,
+) -> Vec<Vec<InlineKeyboardButton>> {
+    let mut rows = categories
+        .iter()
+        .take(BUTTON_PAGE_SIZE)
+        .map(|category| {
+            vec![InlineKeyboardButton {
+                text: category_button_label(category),
+                callback_data: Some(format!("cat:{}", category.page_id)),
+                url: None,
+                style: None,
+            }]
+        })
+        .collect::<Vec<_>>();
+    if let Some(token) = page_token
+        && total_pages > 1
+    {
+        rows.push(pagination_row(page_kind, token, page_index, total_pages));
+    }
+    rows
+}
+
+/// Formats a Telegram result heading with a one-based page marker.
+pub fn paginated_title(title: &str, page_index: usize, total_pages: usize) -> String {
+    if total_pages > 1 {
+        format!("{title} {}/{}", page_index + 1, total_pages)
+    } else {
+        title.to_string()
+    }
+}
+
+/// Builds the navigation row used by in-place pagination callbacks.
+fn pagination_row(
+    kind: &str,
+    page_token: &str,
+    page_index: usize,
+    total_pages: usize,
+) -> Vec<InlineKeyboardButton> {
+    let mut row = Vec::new();
+    if page_index > 0 {
+        row.push(InlineKeyboardButton {
+            text: "Prev".into(),
+            callback_data: Some(format!("pg:{kind}:{page_token}:{}", page_index - 1)),
+            url: None,
+            style: None,
+        });
+    }
+    if page_index + 1 < total_pages {
+        row.push(InlineKeyboardButton {
+            text: "Next".into(),
+            callback_data: Some(format!("pg:{kind}:{page_token}:{}", page_index + 1)),
+            url: None,
+            style: None,
+        });
+    }
+    row
 }
 
 /// Formats file metadata as an HTML caption/message.
@@ -1165,10 +1255,11 @@ pub fn human_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Update, file_buttons, format_file_metadata, human_bytes, inline_result, short_inline_text,
-        telegram_photo_caption, telegram_preview_url,
+        Update, category_buttons_page, file_buttons, file_buttons_page, format_file_metadata,
+        human_bytes, inline_result, paginated_title, short_inline_text, telegram_photo_caption,
+        telegram_preview_url,
     };
-    use crate::models::{FileHit, Preferences};
+    use crate::models::{CategoryHit, FileHit, Preferences};
 
     #[test]
     fn deserializes_inline_location() {
@@ -1214,6 +1305,44 @@ mod tests {
         let buttons = file_buttons(&[large, audio], &Preferences::default());
         assert_eq!(buttons[0][0].style.as_deref(), Some("danger"));
         assert_eq!(buttons[1][0].style.as_deref(), Some("primary"));
+    }
+
+    #[test]
+    fn renders_paginated_file_navigation() {
+        let files = (0..20)
+            .map(|page_id| FileHit {
+                page_id,
+                file_name: format!("{page_id}.jpg"),
+                ..FileHit::default()
+            })
+            .collect::<Vec<_>>();
+
+        let rows = file_buttons_page(&files, &Preferences::default(), Some("abcdef"), 1, 3);
+
+        let nav = rows.last().unwrap();
+        assert_eq!(paginated_title("Files", 1, 3), "Files 2/3");
+        assert_eq!(nav[0].text, "Prev");
+        assert_eq!(nav[0].callback_data.as_deref(), Some("pg:f:abcdef:0"));
+        assert_eq!(nav[1].text, "Next");
+        assert_eq!(nav[1].callback_data.as_deref(), Some("pg:f:abcdef:2"));
+    }
+
+    #[test]
+    fn renders_subcategory_pagination_callbacks() {
+        let categories = vec![CategoryHit {
+            page_id: 42,
+            title: "Category:Minsk".into(),
+            display_title: "Minsk".into(),
+            file_count: None,
+        }];
+
+        let rows = category_buttons_page(&categories, Some("abcdef"), 0, 2, "s");
+
+        assert_eq!(rows[0][0].callback_data.as_deref(), Some("cat:42"));
+        assert_eq!(
+            rows.last().unwrap()[0].callback_data.as_deref(),
+            Some("pg:s:abcdef:1")
+        );
     }
 
     #[test]

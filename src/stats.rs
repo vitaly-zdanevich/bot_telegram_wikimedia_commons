@@ -1,4 +1,5 @@
 use crate::aws::AwsJsonClient;
+use crate::commons_cache::{CommonsCacheStats, cache_stats};
 use crate::config::Config;
 use anyhow::Result;
 use html_escape::encode_text;
@@ -36,6 +37,8 @@ pub struct StatsSnapshot {
     pub daily_invocations: [u64; 7],
     /// Labels for the daily invocation chart.
     pub daily_labels: [String; 7],
+    /// Warm Lambda Commons cache usage.
+    pub commons_cache: CommonsCacheStats,
 }
 
 impl StatsSnapshot {
@@ -49,6 +52,7 @@ impl StatsSnapshot {
         let dynamodb_gb = self.dynamodb_size_bytes as f64 / 1024.0 / 1024.0 / 1024.0;
         let dynamodb_pct = percent(dynamodb_gb, DYNAMODB_FREE_STORAGE_GB);
         let summary = render_summary_block(self);
+        let cache = render_cache_block(&self.commons_cache);
         let cloudwatch_url = format!(
             "https://{}.console.aws.amazon.com/cloudwatch/home?region={}#logsV2:log-groups/log-group/$252Faws$252Flambda$252F{}",
             config.aws_region, config.aws_region, config.lambda_function_name
@@ -82,8 +86,9 @@ impl StatsSnapshot {
         };
 
         format!(
-            "Stats\n\n<pre>{}</pre>\n{}\nFree tier use estimate, based on last 7 days as a rough monthly signal:\nLambda requests: {:.1}%\nLambda duration: {:.1}% ({:.0} GB-s)\nDynamoDB storage: {:.3}% ({:.4} GB)\n\nAWS Lambda free tier: https://aws.amazon.com/lambda/pricing/\nDynamoDB free tier: https://aws.amazon.com/dynamodb/pricing/\nCloudWatch: {}\nDynamoDB: {}",
+            "Stats\n\n<pre>{}</pre>\n\nCache\n<pre>{}</pre>\n{}\nFree tier use estimate, based on last 7 days as a rough monthly signal:\nLambda requests: {:.1}%\nLambda duration: {:.1}% ({:.0} GB-s)\nDynamoDB storage: {:.3}% ({:.4} GB)\n\nAWS Lambda free tier: https://aws.amazon.com/lambda/pricing/\nDynamoDB free tier: https://aws.amazon.com/dynamodb/pricing/\nCloudWatch: {}\nDynamoDB: {}",
             encode_text(&summary),
+            encode_text(&cache),
             daily_chart,
             request_pct,
             duration_pct,
@@ -111,11 +116,43 @@ fn render_summary_block(stats: &StatsSnapshot) -> String {
     )
 }
 
+/// Renders fixed-width cache rows for Telegram monospace display.
+fn render_cache_block(cache: &CommonsCacheStats) -> String {
+    let ram_pct = percent(
+        cache.ram_file_bytes_bytes as f64,
+        cache.ram_file_bytes_max_bytes as f64,
+    );
+    let tmp_pct = percent(
+        cache.tmp_file_bytes_bytes as f64,
+        cache.tmp_file_bytes_max_bytes as f64,
+    );
+    format!(
+        "RAM meta entries {:>8}\nRAM file bytes  {:>8} / {:>8} ({:>5.1}%) entries {:>5}\n/tmp file bytes {:>8} / {:>8} ({:>5.1}%) entries {:>5}\nSearch entries   {:>8}\nCategory entries {:>8}",
+        cache.ram_metadata_entries(),
+        format_bytes(cache.ram_file_bytes_bytes as u64),
+        format_bytes(cache.ram_file_bytes_max_bytes as u64),
+        ram_pct,
+        cache.ram_file_bytes_entries,
+        format_bytes(cache.tmp_file_bytes_bytes),
+        format_bytes(cache.tmp_file_bytes_max_bytes),
+        tmp_pct,
+        cache.tmp_file_bytes_entries,
+        cache.file_search_entries,
+        cache.category_search_entries
+            + cache.category_info_entries
+            + cache.category_file_count_entries,
+    )
+}
+
 /// Loads live Lambda and DynamoDB stats through minimal signed AWS HTTP calls.
 pub async fn load_admin_stats(config: &Config) -> Result<StatsSnapshot> {
+    let commons_cache = cache_stats().await;
     let aws = AwsJsonClient::new(config.aws_region.clone());
     if !aws.has_credentials() {
-        return Ok(StatsSnapshot::default());
+        return Ok(StatsSnapshot {
+            commons_cache,
+            ..StatsSnapshot::default()
+        });
     }
 
     let now = OffsetDateTime::now_utc();
@@ -145,6 +182,7 @@ pub async fn load_admin_stats(config: &Config) -> Result<StatsSnapshot> {
         dynamodb_size_bytes,
         daily_invocations,
         daily_labels,
+        commons_cache,
     })
 }
 
@@ -295,6 +333,25 @@ fn percent(value: f64, limit: f64) -> f64 {
     }
 }
 
+/// Formats bytes for compact stat rows.
+fn format_bytes(bytes: u64) -> String {
+    let units = ["B", "KB", "MB", "GB"];
+    let mut value = bytes as f64;
+    let mut unit = units[0];
+    for next in units.iter().skip(1) {
+        if value < 1024.0 {
+            break;
+        }
+        value /= 1024.0;
+        unit = next;
+    }
+    if unit == "B" {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {unit}")
+    }
+}
+
 /// Renders a 7-column ASCII chart.
 pub fn render_week_chart(values: &[u64; 7], labels: &[&str; 7]) -> String {
     let max = values.iter().copied().max().unwrap_or(0).max(1);
@@ -311,7 +368,10 @@ pub fn render_week_chart(values: &[u64; 7], labels: &[&str; 7]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{StatsSnapshot, parse_metric_values, render_summary_block, render_week_chart};
+    use super::{
+        CommonsCacheStats, StatsSnapshot, parse_metric_values, render_cache_block,
+        render_summary_block, render_week_chart,
+    };
 
     #[test]
     fn renders_summary_block_for_monospace() {
@@ -335,6 +395,28 @@ mod tests {
         );
         assert!(chart.contains("Tue"));
         assert!(chart.contains("######"));
+    }
+
+    #[test]
+    fn renders_cache_block_for_monospace() {
+        let block = render_cache_block(&CommonsCacheStats {
+            file_by_page_id_entries: 2,
+            file_by_title_entries: 2,
+            file_search_entries: 3,
+            category_search_entries: 4,
+            ram_file_bytes_entries: 1,
+            ram_file_bytes_bytes: 10 * 1024 * 1024,
+            ram_file_bytes_max_bytes: 100 * 1024 * 1024,
+            tmp_file_bytes_entries: 2,
+            tmp_file_bytes_bytes: 20 * 1024 * 1024,
+            tmp_file_bytes_max_bytes: 200 * 1024 * 1024,
+            ..CommonsCacheStats::default()
+        });
+
+        assert!(block.contains("RAM meta entries"));
+        assert!(block.contains("RAM file bytes"));
+        assert!(block.contains("/tmp file bytes"));
+        assert!(block.contains("10.0%"));
     }
 
     #[test]

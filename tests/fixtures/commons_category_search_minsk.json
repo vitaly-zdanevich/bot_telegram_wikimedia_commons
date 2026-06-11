@@ -1,0 +1,8 @@
+{
+  "query": {
+    "search": [
+      {"pageid": 1001, "title": "Category:Minsk"},
+      {"pageid": 1002, "title": "Category:Buildings in Minsk"}
+    ]
+  }
+}

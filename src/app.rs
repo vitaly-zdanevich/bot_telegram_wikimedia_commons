@@ -5,17 +5,21 @@ use crate::models::{
     COMMONS_MODEL_EXTENSIONS, COMMONS_VIDEO_EXTENSIONS, DeliveryMode, DocumentPageMode, FileType,
     Intent, Preferences, SearchQuery,
 };
+use crate::pagination::{BUTTON_PAGE_SIZE, category_page, file_page};
 use crate::parser::{is_commons_supported_extension, parse_intent, tokenize};
 use crate::preferences::PreferenceStore;
 use crate::stats::load_admin_stats;
 use crate::telegram::{
-    InlineKeyboardButton, InlineKeyboardMarkup, TelegramClient, Update, format_category_info,
-    format_file_metadata, send_search_results,
+    InlineKeyboardButton, InlineKeyboardMarkup, TelegramClient, Update, category_buttons_page,
+    file_buttons_page, format_category_info, format_file_metadata, paginated_title,
+    send_search_results,
 };
 use crate::wikidata::WikidataClient;
 use anyhow::{Context, Result};
 use lambda_http::{Body, Request, Response};
 use serde_json::json;
+
+const PAGINATED_RESULT_LIMIT: usize = BUTTON_PAGE_SIZE * 3;
 
 /// Handles one AWS Lambda HTTP request from Telegram.
 pub async fn handle_lambda_request(request: Request) -> Result<Response<Body>> {
@@ -119,17 +123,26 @@ pub async fn handle_update(update: Update, config: &Config) -> Result<()> {
                 }
             }
             Intent::CategorySearch(query) => {
-                let mut categories = commons.search_categories(&query, 20).await?;
                 let prefs = preferences.get(user_id).await;
+                let mut categories = commons
+                    .search_categories(&query, category_result_limit(&prefs))
+                    .await?;
                 if prefs.show_category_counts {
                     enrich_category_counts(&commons, &mut categories).await;
                 }
-                telegram.send_category_buttons(chat_id, &categories).await?;
+                telegram
+                    .send_category_buttons(chat_id, &categories, prefs.pagination_enabled)
+                    .await?;
             }
             Intent::FileSearch(query) => {
                 let prefs = preferences.get(user_id).await;
                 let files = commons
-                    .search_files(&query, &prefs, 20, config.max_file_bytes)
+                    .search_files(
+                        &query,
+                        &prefs,
+                        file_result_limit(&query, &prefs),
+                        config.max_file_bytes,
+                    )
                     .await?;
                 send_search_results(
                     &telegram,
@@ -143,11 +156,15 @@ pub async fn handle_update(update: Update, config: &Config) -> Result<()> {
                 if !query.links_flag && !query.image_previews_flag {
                     let category_query = query.term_text();
                     if !category_query.is_empty() {
-                        let mut categories = commons.search_categories(&category_query, 20).await?;
+                        let mut categories = commons
+                            .search_categories(&category_query, category_result_limit(&prefs))
+                            .await?;
                         if prefs.show_category_counts {
                             enrich_category_counts(&commons, &mut categories).await;
                         }
-                        telegram.send_category_buttons(chat_id, &categories).await?;
+                        telegram
+                            .send_category_buttons(chat_id, &categories, prefs.pagination_enabled)
+                            .await?;
                     }
                 }
             }
@@ -192,6 +209,16 @@ pub async fn handle_update(update: Update, config: &Config) -> Result<()> {
                         .await?;
                     }
                 }
+            } else if let Some((kind, token, page_index)) = parse_pagination_callback(data) {
+                let message_id = callback
+                    .message
+                    .as_ref()
+                    .and_then(|message| message.message_id)
+                    .context("pagination callback has no editable message id")?;
+                edit_paginated_results(
+                    &telegram, chat_id, message_id, kind, token, page_index, &prefs,
+                )
+                .await?;
             } else if let Some(page_id) = data
                 .strip_prefix("file:")
                 .and_then(|value| value.parse::<u64>().ok())
@@ -217,7 +244,12 @@ pub async fn handle_update(update: Update, config: &Config) -> Result<()> {
                 .and_then(|value| value.parse::<u64>().ok())
             {
                 let mut category = commons
-                    .category_info_by_page_id(page_id, 20, 20, config.max_file_bytes)
+                    .category_info_by_page_id(
+                        page_id,
+                        category_result_limit(&prefs),
+                        category_result_limit(&prefs),
+                        config.max_file_bytes,
+                    )
                     .await?;
                 enrich_category_wikidata(&wikidata, &mut category).await;
                 telegram
@@ -227,7 +259,11 @@ pub async fn handle_update(update: Update, config: &Config) -> Result<()> {
                     .send_file_buttons(chat_id, &category.files, &prefs)
                     .await?;
                 telegram
-                    .send_subcategory_buttons(chat_id, &category.subcategories)
+                    .send_subcategory_buttons(
+                        chat_id,
+                        &category.subcategories,
+                        prefs.pagination_enabled,
+                    )
                     .await?;
             }
         }
@@ -320,6 +356,116 @@ async fn send_or_edit_preferences(
             .await
     } else {
         telegram.send_message(chat_id, &text, keyboard).await
+    }
+}
+
+/// Edits a paginated result message in place for a file or category callback.
+async fn edit_paginated_results(
+    telegram: &TelegramClient,
+    chat_id: i64,
+    message_id: i64,
+    kind: &str,
+    token: &str,
+    page_index: usize,
+    preferences: &Preferences,
+) -> Result<()> {
+    match kind {
+        "f" => {
+            let Some(page) = file_page(token, page_index).await else {
+                return telegram
+                    .edit_message(
+                        chat_id,
+                        message_id,
+                        "Pagination expired. Run the search again.",
+                        None,
+                    )
+                    .await;
+            };
+            telegram
+                .edit_message(
+                    chat_id,
+                    message_id,
+                    &paginated_title("Files", page.page_index, page.total_pages),
+                    Some(InlineKeyboardMarkup {
+                        inline_keyboard: file_buttons_page(
+                            &page.items,
+                            preferences,
+                            Some(token),
+                            page.page_index,
+                            page.total_pages,
+                        ),
+                    }),
+                )
+                .await
+        }
+        "c" | "s" => {
+            let Some(page) = category_page(token, page_index).await else {
+                return telegram
+                    .edit_message(
+                        chat_id,
+                        message_id,
+                        "Pagination expired. Run the search again.",
+                        None,
+                    )
+                    .await;
+            };
+            let title = if kind == "s" {
+                "Subcategories"
+            } else {
+                "Categories"
+            };
+            telegram
+                .edit_message(
+                    chat_id,
+                    message_id,
+                    &paginated_title(title, page.page_index, page.total_pages),
+                    Some(InlineKeyboardMarkup {
+                        inline_keyboard: category_buttons_page(
+                            &page.items,
+                            Some(token),
+                            page.page_index,
+                            page.total_pages,
+                            kind,
+                        ),
+                    }),
+                )
+                .await
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Parses a compact pagination callback payload.
+fn parse_pagination_callback(data: &str) -> Option<(&str, &str, usize)> {
+    let mut parts = data.split(':');
+    if parts.next()? != "pg" {
+        return None;
+    }
+    let kind = parts.next()?;
+    let token = parts.next()?;
+    let page_index = parts.next()?.parse::<usize>().ok()?;
+    parts.next().is_none().then_some((kind, token, page_index))
+}
+
+/// Returns the file search limit needed by the selected Telegram delivery mode.
+fn file_result_limit(query: &SearchQuery, preferences: &Preferences) -> usize {
+    if preferences.pagination_enabled
+        && preferences.delivery_mode == DeliveryMode::Buttons
+        && !query.links_flag
+        && !query.image_previews_flag
+    {
+        PAGINATED_RESULT_LIMIT
+    } else {
+        BUTTON_PAGE_SIZE
+    }
+}
+
+/// Returns the category search limit needed by the category button renderer.
+fn category_result_limit(preferences: &Preferences) -> usize {
+    if preferences.pagination_enabled {
+        PAGINATED_RESULT_LIMIT
+    } else {
+        BUTTON_PAGE_SIZE
     }
 }
 
@@ -439,6 +585,10 @@ fn apply_preference_callback(
         }
         "toggle:preview-metadata" => {
             preferences.show_preview_metadata = !preferences.show_preview_metadata;
+            changed = true;
+        }
+        "toggle:pagination" => {
+            preferences.pagination_enabled = !preferences.pagination_enabled;
             changed = true;
         }
         _ if action.starts_with("ext:group:") => {
@@ -578,6 +728,10 @@ fn main_preferences_keyboard(preferences: &Preferences) -> Vec<Vec<InlineKeyboar
                 "pref:toggle:sha1",
             ),
         ],
+        vec![pref_button(
+            toggle_label(preferences.pagination_enabled, "Pagination"),
+            "pref:toggle:pagination",
+        )],
         vec![
             pref_button(
                 checked_label(
@@ -756,6 +910,8 @@ pub fn update_preferences(text: &str, mut preferences: Preferences) -> Preferenc
             ("filesize", "off") => preferences.show_file_size = false,
             ("preview-metadata" | "metadata", "on") => preferences.show_preview_metadata = true,
             ("preview-metadata" | "metadata", "off") => preferences.show_preview_metadata = false,
+            ("pagination", "on") => preferences.pagination_enabled = true,
+            ("pagination", "off") => preferences.pagination_enabled = false,
             ("mode", value) => {
                 if let Some(mode) = DeliveryMode::parse(value) {
                     preferences.delivery_mode = mode;
@@ -814,12 +970,13 @@ fn format_preferences(preferences: &Preferences, config: &Config) -> String {
         "saved in DynamoDB when configured"
     };
     format!(
-        "Preferences ({storage})\n\nCategory counts: {}\nMode: {}\nFile type: {}\nExtension: {}\nPreview metadata: {}\nSHA-1: {}\nFile size in buttons: {}\nFavorites: {}\nCategory blacklist: {}\nUploader blacklist: {}\n\nUse the buttons below, or commands:\n/settings mode buttons|links10|images10|images20\n/settings type all|images|audio|video\n/settings ext jpg|webp|flac|pdf|off\n/settings category-counts on|off\n/settings preview-metadata on|off\n/settings sha1 on|off\n/settings filesize on|off\n/settings favorite add Category name\n/settings blacklist-category add Category name\n/settings blacklist-user add Username\n\nAliases: /prefs, /preferences",
+        "Preferences ({storage})\n\nCategory counts: {}\nMode: {}\nFile type: {}\nExtension: {}\nPreview metadata: {}\nPagination: {}\nSHA-1: {}\nFile size in buttons: {}\nFavorites: {}\nCategory blacklist: {}\nUploader blacklist: {}\n\nUse the buttons below, or commands:\n/settings mode buttons|links10|images10|images20\n/settings type all|images|audio|video\n/settings ext jpg|webp|flac|pdf|off\n/settings category-counts on|off\n/settings preview-metadata on|off\n/settings pagination on|off\n/settings sha1 on|off\n/settings filesize on|off\n/settings favorite add Category name\n/settings blacklist-category add Category name\n/settings blacklist-user add Username\n\nAliases: /prefs, /preferences",
         yes_no(preferences.show_category_counts),
         preferences.delivery_mode.as_pref_value(),
         preferences.file_type.as_pref_value(),
         preferences.extension.as_deref().unwrap_or("none"),
         yes_no(preferences.show_preview_metadata),
+        yes_no(preferences.pagination_enabled),
         yes_no(preferences.show_sha1),
         yes_no(preferences.show_file_size),
         preferences.favorite_categories.join(", "),
@@ -839,7 +996,7 @@ fn help_text(config: &Config, preferences: &Preferences) -> String {
         )
     };
     format!(
-        "<b>Wikimedia Commons bot</b>\n\nUnofficial Wikimedia Commons search bot. Source: <a href=\"{}\">{}</a>\nLicense: MIT\n\nSearch examples:\n<pre>Minsk\n-img Minsk\n-links Minsk\nimage Minsk\nbild Berlin\naudio:bird\nflac Minsk c birds\nUser:Vitaly_Zdanevich date:2025 Minsk\nuser:Vitaly_Zdanevich d:7days audio:something\ns:&gt;10MB s:&lt;20MB Minsk\nCategory Minsk\nKategorie Berlin\nКатегория Минск\nКатэгорыя Мінск</pre>\n\nAliases: category/c, Kategorie/kat/k, категория/катэгорыя/к/с; user/u/Benutzer; image/images/img/i, Bild/Bilder/Foto/Fotos, выява/ваява/в; audio/sound/music, Ton/Klang/Musik, аудио/музыка/звук/аудыё; date/d/Datum; size/s/Größe/Groesse/g. Use -img for Telegram image previews with metadata captions, -links for 10 compact links, and /settings to open preferences. Preview metadata is enabled by default and can be disabled in /settings.\n\nInline mode can use Telegram's shared location to show nearby geotagged images. Without location, or with structured filters like user:, category, date, size, or extension, it searches by your typed query.\n\nClick file buttons to receive the file with metadata, license, uploader, date, source link, geolocation when available, and upload version count. Telegram bot uploads are limited to 50 MB, so larger files are filtered out. Files larger than 20 MB use red buttons; audio uses blue buttons.\n\nUpload your own free photos, audio, video, and other files to Wikimedia Commons: <a href=\"https://commons.wikimedia.org/wiki/Special:UploadWizard\">Upload Wizard</a>. Many upload tools are listed at <a href=\"https://commons.wikimedia.org/wiki/Commons:Upload_tools\">Commons upload tools</a>. Storage is unlimited, and all files are public.\n\nSupport: @vitaly_zdanevich\n\nAWS free-tier docs: <a href=\"https://aws.amazon.com/lambda/pricing/\">Lambda</a>, <a href=\"https://aws.amazon.com/dynamodb/pricing/\">DynamoDB</a>.{favorites}",
+        "<b>Wikimedia Commons bot</b>\n\nUnofficial Wikimedia Commons search bot. Source: <a href=\"{}\">{}</a>\nLicense: MIT\n\nSearch examples:\n<pre>Minsk\n-img Minsk\n-links Minsk\nimage Minsk\nbild Berlin\naudio:bird\nflac Minsk c birds\nUser:Vitaly_Zdanevich date:2025 Minsk\nuser:Vitaly_Zdanevich d:7days audio:something\ns:&gt;10MB s:&lt;20MB Minsk\nCategory Minsk\nKategorie Berlin\nКатегория Минск\nКатэгорыя Мінск</pre>\n\nAliases: category/c, Kategorie/kat/k, категория/катэгорыя/к/с; user/u/Benutzer; image/images/img/i, Bild/Bilder/Foto/Fotos, выява/ваява/в; audio/sound/music, Ton/Klang/Musik, аудио/музыка/звук/аудыё; date/d/Datum; size/s/Größe/Groesse/g. Use -img for Telegram image previews with metadata captions, -links for 10 compact links, and /settings to open preferences. Preview metadata and button pagination are enabled by default and can be disabled in /settings.\n\nInline mode can use Telegram's shared location to show nearby geotagged images. Without location, or with structured filters like user:, category, date, size, or extension, it searches by your typed query.\n\nClick file buttons to receive the file with metadata, license, uploader, date, source link, geolocation when available, and upload version count. Telegram bot uploads are limited to 50 MB, so larger files are filtered out. Files larger than 20 MB use red buttons; audio uses blue buttons.\n\nUpload your own free photos, audio, video, and other files to Wikimedia Commons: <a href=\"https://commons.wikimedia.org/wiki/Special:UploadWizard\">Upload Wizard</a>. Many upload tools are listed at <a href=\"https://commons.wikimedia.org/wiki/Commons:Upload_tools\">Commons upload tools</a>. Storage is unlimited, and all files are public.\n\nSupport: @vitaly_zdanevich\n\nAWS free-tier docs: <a href=\"https://aws.amazon.com/lambda/pricing/\">Lambda</a>, <a href=\"https://aws.amazon.com/dynamodb/pricing/\">DynamoDB</a>.{favorites}",
         config.github_url, config.github_url
     )
 }
@@ -864,9 +1021,9 @@ fn yes_no(value: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExtensionGroup, PreferencesView, apply_preference_callback, help_text,
-        inline_location_applies, is_preferences_update_command, preferences_keyboard,
-        update_preferences,
+        ExtensionGroup, PreferencesView, apply_preference_callback, category_result_limit,
+        file_result_limit, help_text, inline_location_applies, is_preferences_update_command,
+        parse_pagination_callback, preferences_keyboard, update_preferences,
     };
     use crate::config::Config;
     use crate::models::{DeliveryMode, FileType, Preferences, SearchQuery, SizeFilter, SizeOp};
@@ -881,6 +1038,8 @@ mod tests {
         assert!(prefs.show_sha1);
         let prefs = update_preferences("/prefs preview-metadata off", prefs);
         assert!(!prefs.show_preview_metadata);
+        let prefs = update_preferences("/prefs pagination off", prefs);
+        assert!(!prefs.pagination_enabled);
         let prefs = update_preferences("/settings ext webp", prefs);
         assert_eq!(prefs.extension, Some("webp".into()));
         let prefs = update_preferences("/settings ext avif", prefs);
@@ -963,6 +1122,7 @@ mod tests {
         assert!(labels.contains(&"✅ Images"));
         assert!(labels.contains(&"✅ SHA-1"));
         assert!(labels.contains(&"✅ Preview metadata"));
+        assert!(labels.contains(&"✅ Pagination"));
         assert!(labels.contains(&"Extension: webp"));
     }
 
@@ -984,5 +1144,46 @@ mod tests {
             apply_preference_callback("toggle:preview-metadata", Preferences::default()).unwrap();
         assert!(result.changed);
         assert!(!result.preferences.show_preview_metadata);
+    }
+
+    #[test]
+    fn toggles_pagination_callback() {
+        let result =
+            apply_preference_callback("toggle:pagination", Preferences::default()).unwrap();
+
+        assert!(result.changed);
+        assert!(!result.preferences.pagination_enabled);
+    }
+
+    #[test]
+    fn parses_pagination_callback_payload() {
+        assert_eq!(
+            parse_pagination_callback("pg:f:abcdef0123456789:2"),
+            Some(("f", "abcdef0123456789", 2))
+        );
+        assert!(parse_pagination_callback("file:1").is_none());
+    }
+
+    #[test]
+    fn widens_only_paginated_button_result_limits() {
+        let prefs = Preferences::default();
+        assert_eq!(file_result_limit(&SearchQuery::default(), &prefs), 60);
+        assert_eq!(category_result_limit(&prefs), 60);
+
+        let image_query = SearchQuery {
+            image_previews_flag: true,
+            ..SearchQuery::default()
+        };
+        assert_eq!(file_result_limit(&image_query, &prefs), 20);
+
+        let no_pagination = Preferences {
+            pagination_enabled: false,
+            ..Preferences::default()
+        };
+        assert_eq!(
+            file_result_limit(&SearchQuery::default(), &no_pagination),
+            20
+        );
+        assert_eq!(category_result_limit(&no_pagination), 20);
     }
 }

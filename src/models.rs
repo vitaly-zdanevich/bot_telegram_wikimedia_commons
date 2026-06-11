@@ -169,6 +169,9 @@ pub struct Preferences {
     /// Whether `-img` preview captions include file metadata.
     #[serde(default = "default_true")]
     pub show_preview_metadata: bool,
+    /// Whether file/category button lists should include in-place pagination.
+    #[serde(default = "default_true")]
+    pub pagination_enabled: bool,
     /// PDF delivery mode.
     pub pdf_mode: DocumentPageMode,
     /// DjVu delivery mode.
@@ -188,6 +191,7 @@ impl Default for Preferences {
             show_sha1: false,
             show_file_size: false,
             show_preview_metadata: true,
+            pagination_enabled: true,
             pdf_mode: DocumentPageMode::Original,
             djvu_mode: DocumentPageMode::Original,
         }

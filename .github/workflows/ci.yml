@@ -25,6 +25,16 @@ jobs:
       - run: cargo test --locked
       - run: cargo clippy --locked --all-targets -- -D warnings
 
+  audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit
+
   terraform:
     name: Terraform Format
     runs-on: ubuntu-latest
@@ -36,7 +46,7 @@ jobs:
   ci-binaries:
     name: CI CLI Binary
     runs-on: ubuntu-latest
-    needs: [rust, terraform]
+    needs: [rust, audit, terraform]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     strategy:
       matrix:
@@ -59,8 +69,11 @@ jobs:
           CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: cargo build --release --locked --bin commons-cli --target ${{ matrix.target }}
+      - name: Smoke-test CLI
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: target/${{ matrix.target }}/release/commons-cli --help >/dev/null
       - run: cp target/${{ matrix.target }}/release/commons-cli ${{ matrix.asset }}
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.asset }}
           path: ${{ matrix.asset }}

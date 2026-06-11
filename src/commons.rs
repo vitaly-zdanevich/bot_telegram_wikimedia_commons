@@ -1,4 +1,12 @@
 use crate::aws::AwsJsonClient;
+use crate::commons_cache::{
+    cached_auth_cookie_header, cached_category_file_count, cached_category_info,
+    cached_category_search, cached_file_bytes, cached_file_search, cached_files_by_page_id,
+    cached_files_by_title, cached_page_title, cached_uploader_name, file_bytes_cache_key,
+    file_search_cache_key, put_file_search_cache, remember_auth_cookie_header,
+    remember_category_file_count, remember_category_info, remember_category_search,
+    remember_file_bytes, remember_files, remember_page_title, remember_uploader_name,
+};
 use crate::config::Config;
 use crate::models::{
     CategoryHit, CategoryInfo, Coordinates, DateFilter, FileHit, FileType, Preferences,
@@ -9,19 +17,13 @@ use crate::parser::{
 };
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use once_cell::sync::Lazy;
 use reqwest::{Client, header::COOKIE};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::env;
-use std::hash::Hash;
-use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::SystemTime;
 use time::{Date, Duration, OffsetDateTime};
-use tokio::sync::{Mutex, OnceCell, RwLock};
+use tokio::sync::OnceCell;
 use url::Url;
 
 /// Default maximum Commons candidates fetched before local filtering.
@@ -30,34 +32,6 @@ const SEARCH_CANDIDATE_LIMIT: usize = 60;
 const TELEGRAM_PREVIEW_THUMB_WIDTH: &str = "1280";
 /// Commons GeoData radius used for inline location searches.
 const NEARBY_SEARCH_RADIUS_METERS: u32 = 10_000;
-/// Maximum file metadata objects kept in warm Lambda RAM per cache.
-const FILE_METADATA_CACHE_MAX_ENTRIES: usize = 10_000;
-/// Maximum search/category result objects kept in warm Lambda RAM per cache.
-const RESULT_CACHE_MAX_ENTRIES: usize = 1_024;
-/// Directory used for warm Lambda original-file byte caching.
-const FILE_DISK_CACHE_DIR: &str = "/tmp/telegram-wikimedia-commons-bot-file-cache";
-
-static FILE_BY_PAGE_ID_CACHE: Lazy<RwLock<HashMap<u64, FileHit>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
-static FILE_BY_TITLE_CACHE: Lazy<RwLock<HashMap<String, FileHit>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
-static FILE_SEARCH_CACHE: Lazy<RwLock<HashMap<String, Vec<FileHit>>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
-static CATEGORY_SEARCH_CACHE: Lazy<RwLock<HashMap<String, Vec<CategoryHit>>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
-static CATEGORY_INFO_CACHE: Lazy<RwLock<HashMap<String, CategoryInfo>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
-static CATEGORY_FILE_COUNT_CACHE: Lazy<RwLock<HashMap<String, u64>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
-static PAGE_TITLE_CACHE: Lazy<RwLock<HashMap<u64, Option<String>>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
-static UPLOADER_NAME_CACHE: Lazy<RwLock<HashMap<String, Option<String>>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
-static AUTH_COOKIE_HEADER_CACHE: Lazy<RwLock<HashMap<String, Option<String>>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
-static FILE_BYTES_CACHE: Lazy<RwLock<FileBytesCache>> =
-    Lazy::new(|| RwLock::new(FileBytesCache::new(file_bytes_cache_max_bytes())));
-static FILE_DISK_CACHE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 /// HTTP client for Wikimedia Commons Action API.
 #[derive(Clone)]
@@ -123,12 +97,7 @@ impl CommonsClient {
         let Some(parameter) = &self.auth_cookie_parameter else {
             return Ok(None);
         };
-        if let Some(cached) = AUTH_COOKIE_HEADER_CACHE
-            .read()
-            .await
-            .get(parameter)
-            .cloned()
-        {
+        if let Some(cached) = cached_auth_cookie_header(parameter).await {
             return Ok(cached);
         }
         if !self.aws.has_credentials() {
@@ -149,15 +118,7 @@ impl CommonsClient {
             return Ok(None);
         };
         let header = lwp_cookie_header(cookie_jar);
-        {
-            let mut cache = AUTH_COOKIE_HEADER_CACHE.write().await;
-            bounded_insert(
-                &mut cache,
-                parameter.clone(),
-                header.clone(),
-                RESULT_CACHE_MAX_ENTRIES,
-            );
-        }
+        remember_auth_cookie_header(parameter.clone(), header.clone()).await;
         Ok(header)
     }
 
@@ -360,7 +321,7 @@ impl CommonsClient {
     /// Resolves a user-typed uploader name to the canonical Commons username.
     async fn resolve_uploader_name(&self, user: &str) -> Result<Option<String>> {
         let cache_key = normalize_username(user).to_lowercase();
-        if let Some(cached) = UPLOADER_NAME_CACHE.read().await.get(&cache_key).cloned() {
+        if let Some(cached) = cached_uploader_name(&cache_key).await {
             return Ok(cached);
         }
         let mut url = Url::parse(&self.api_url)?;
@@ -382,15 +343,7 @@ impl CommonsClient {
                 .iter()
                 .map(|hit| hit.title.as_str()),
         );
-        {
-            let mut cache = UPLOADER_NAME_CACHE.write().await;
-            bounded_insert(
-                &mut cache,
-                cache_key,
-                resolved.clone(),
-                RESULT_CACHE_MAX_ENTRIES,
-            );
-        }
+        remember_uploader_name(cache_key, resolved.clone()).await;
         Ok(resolved)
     }
 
@@ -399,18 +352,7 @@ impl CommonsClient {
         if titles.is_empty() {
             return Ok(Vec::new());
         }
-        let mut ordered_hits = vec![None; titles.len()];
-        let mut missing = Vec::new();
-        {
-            let cache = FILE_BY_TITLE_CACHE.read().await;
-            for (index, title) in titles.iter().enumerate() {
-                if let Some(hit) = cache.get(title).cloned() {
-                    ordered_hits[index] = Some(hit);
-                } else {
-                    missing.push((index, title.clone()));
-                }
-            }
-        }
+        let (mut ordered_hits, missing) = cached_files_by_title(titles).await;
         for chunk in missing.chunks(10) {
             let chunk_titles = chunk
                 .iter()
@@ -448,18 +390,7 @@ impl CommonsClient {
         if page_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let mut ordered_hits = vec![None; page_ids.len()];
-        let mut missing = Vec::new();
-        {
-            let cache = FILE_BY_PAGE_ID_CACHE.read().await;
-            for (index, page_id) in page_ids.iter().enumerate() {
-                if let Some(hit) = cache.get(page_id).cloned() {
-                    ordered_hits[index] = Some(hit);
-                } else {
-                    missing.push((index, *page_id));
-                }
-            }
-        }
+        let (mut ordered_hits, missing) = cached_files_by_page_id(page_ids).await;
         for chunk in missing.chunks(50) {
             let pageids = chunk
                 .iter()
@@ -501,7 +432,7 @@ impl CommonsClient {
     /// Searches Commons categories by name.
     pub async fn search_categories(&self, query: &str, limit: usize) -> Result<Vec<CategoryHit>> {
         let cache_key = format!("{}:{limit}", query.trim().to_lowercase());
-        if let Some(cached) = CATEGORY_SEARCH_CACHE.read().await.get(&cache_key).cloned() {
+        if let Some(cached) = cached_category_search(&cache_key).await {
             return Ok(cached);
         }
         let mut url = Url::parse(&self.api_url)?;
@@ -527,15 +458,7 @@ impl CommonsClient {
                 file_count: None,
             })
             .collect::<Vec<_>>();
-        {
-            let mut cache = CATEGORY_SEARCH_CACHE.write().await;
-            bounded_insert(
-                &mut cache,
-                cache_key,
-                categories.clone(),
-                RESULT_CACHE_MAX_ENTRIES,
-            );
-        }
+        remember_category_search(cache_key, categories.clone()).await;
         Ok(categories)
     }
 
@@ -549,7 +472,7 @@ impl CommonsClient {
     ) -> Result<CategoryInfo> {
         let title = format!("Category:{}", normalize_category(category));
         let cache_key = format!("{title}:{file_limit}:{subcategory_limit}:{max_file_bytes}");
-        if let Some(cached) = CATEGORY_INFO_CACHE.read().await.get(&cache_key).cloned() {
+        if let Some(cached) = cached_category_info(&cache_key).await {
             return Ok(cached);
         }
         let summary = self.category_summary(&title).await?;
@@ -568,15 +491,7 @@ impl CommonsClient {
             ..summary
         };
         remember_files(&info.files).await;
-        {
-            let mut cache = CATEGORY_INFO_CACHE.write().await;
-            bounded_insert(
-                &mut cache,
-                cache_key,
-                info.clone(),
-                RESULT_CACHE_MAX_ENTRIES,
-            );
-        }
+        remember_category_info(cache_key, info.clone()).await;
         Ok(info)
     }
 
@@ -604,7 +519,7 @@ impl CommonsClient {
     /// Counts direct file members in a category when requested by preferences.
     pub async fn category_file_count(&self, category: &str) -> Result<u64> {
         let title = format!("Category:{}", normalize_category(category));
-        if let Some(cached) = CATEGORY_FILE_COUNT_CACHE.read().await.get(&title).copied() {
+        if let Some(cached) = cached_category_file_count(&title).await {
             return Ok(cached);
         }
         let mut count = 0_u64;
@@ -636,10 +551,7 @@ impl CommonsClient {
                 break;
             }
         }
-        {
-            let mut cache = CATEGORY_FILE_COUNT_CACHE.write().await;
-            bounded_insert(&mut cache, title, count, RESULT_CACHE_MAX_ENTRIES);
-        }
+        remember_category_file_count(title, count).await;
         Ok(count)
     }
 
@@ -700,7 +612,7 @@ impl CommonsClient {
 
     /// Loads the title for a MediaWiki page id.
     async fn page_title(&self, page_id: u64) -> Result<Option<String>> {
-        if let Some(cached) = PAGE_TITLE_CACHE.read().await.get(&page_id).cloned() {
+        if let Some(cached) = cached_page_title(page_id).await {
             return Ok(cached);
         }
         let mut url = Url::parse(&self.api_url)?;
@@ -716,10 +628,7 @@ impl CommonsClient {
             .query
             .and_then(|query| query.pages.into_iter().next())
             .and_then(|page| page.title);
-        {
-            let mut cache = PAGE_TITLE_CACHE.write().await;
-            bounded_insert(&mut cache, page_id, title.clone(), RESULT_CACHE_MAX_ENTRIES);
-        }
+        remember_page_title(page_id, title.clone()).await;
         Ok(title)
     }
 
@@ -779,266 +688,6 @@ impl CommonsClient {
             })
             .collect())
     }
-}
-
-/// Inserts into a map while bounding its entry count with best-effort eviction.
-fn bounded_insert<K, V>(map: &mut HashMap<K, V>, key: K, value: V, max_entries: usize)
-where
-    K: Eq + Hash + Clone,
-{
-    if max_entries == 0 {
-        return;
-    }
-    if !map.contains_key(&key)
-        && map.len() >= max_entries
-        && let Some(old_key) = map.keys().next().cloned()
-    {
-        map.remove(&old_key);
-    }
-    map.insert(key, value);
-}
-
-/// Builds a warm-Lambda cache key for file search results.
-fn file_search_cache_key(
-    scope: &str,
-    query: &SearchQuery,
-    preferences: &Preferences,
-    limit: usize,
-    max_file_bytes: u64,
-) -> String {
-    format!("{scope}:{query:?}:{preferences:?}:{limit}:{max_file_bytes}")
-}
-
-/// Returns cached file search results when available.
-async fn cached_file_search(key: &str) -> Option<Vec<FileHit>> {
-    FILE_SEARCH_CACHE.read().await.get(key).cloned()
-}
-
-/// Stores file search results in warm Lambda RAM.
-async fn put_file_search_cache(key: String, hits: Vec<FileHit>) {
-    let mut cache = FILE_SEARCH_CACHE.write().await;
-    bounded_insert(&mut cache, key, hits, RESULT_CACHE_MAX_ENTRIES);
-}
-
-/// Stores file metadata in page-id and title caches.
-async fn remember_files(files: &[FileHit]) {
-    if files.is_empty() {
-        return;
-    }
-    {
-        let mut cache = FILE_BY_PAGE_ID_CACHE.write().await;
-        for file in files {
-            if file.page_id != 0 {
-                bounded_insert(
-                    &mut cache,
-                    file.page_id,
-                    file.clone(),
-                    FILE_METADATA_CACHE_MAX_ENTRIES,
-                );
-            }
-        }
-    }
-    {
-        let mut cache = FILE_BY_TITLE_CACHE.write().await;
-        for file in files {
-            if !file.title.trim().is_empty() {
-                bounded_insert(
-                    &mut cache,
-                    file.title.clone(),
-                    file.clone(),
-                    FILE_METADATA_CACHE_MAX_ENTRIES,
-                );
-            }
-        }
-    }
-}
-
-/// Builds a cache key for original file bytes.
-fn file_bytes_cache_key(file: &FileHit, url: &str) -> String {
-    if let Some(sha1) = file.sha1.as_deref().filter(|value| !value.is_empty()) {
-        format!("sha1:{sha1}")
-    } else if file.page_id != 0 {
-        format!("page:{}:{url}", file.page_id)
-    } else {
-        format!("url:{url}")
-    }
-}
-
-/// Returns cached original file bytes from RAM or `/tmp`.
-async fn cached_file_bytes(key: &str) -> Option<Bytes> {
-    if let Some(bytes) = FILE_BYTES_CACHE.read().await.get(key) {
-        return Some(bytes);
-    }
-    let bytes = read_disk_cached_file_bytes(key).await?;
-    FILE_BYTES_CACHE
-        .write()
-        .await
-        .insert(key.to_string(), bytes.clone());
-    Some(bytes)
-}
-
-/// Stores original file bytes in RAM and in the `/tmp` fallback cache.
-async fn remember_file_bytes(key: String, bytes: Bytes) {
-    FILE_BYTES_CACHE
-        .write()
-        .await
-        .insert(key.clone(), bytes.clone());
-    if let Err(error) = write_disk_cached_file_bytes(&key, &bytes).await {
-        tracing::warn!(
-            error = %format!("{error:#}"),
-            "failed to write Commons file bytes to /tmp cache"
-        );
-    }
-}
-
-/// In-memory byte cache with a hard byte budget and best-effort eviction.
-#[derive(Debug)]
-struct FileBytesCache {
-    max_bytes: usize,
-    total_bytes: usize,
-    files: HashMap<String, Bytes>,
-}
-
-impl FileBytesCache {
-    /// Creates a byte cache with a hard maximum size.
-    fn new(max_bytes: usize) -> Self {
-        Self {
-            max_bytes,
-            total_bytes: 0,
-            files: HashMap::new(),
-        }
-    }
-
-    /// Returns cached bytes by key.
-    fn get(&self, key: &str) -> Option<Bytes> {
-        self.files.get(key).cloned()
-    }
-
-    /// Inserts bytes when the object can fit, evicting arbitrary old entries if needed.
-    fn insert(&mut self, key: String, bytes: Bytes) -> bool {
-        let size = bytes.len();
-        if self.max_bytes == 0 || size > self.max_bytes {
-            return false;
-        }
-        if let Some(existing) = self.files.remove(&key) {
-            self.total_bytes = self.total_bytes.saturating_sub(existing.len());
-        }
-        while self.total_bytes.saturating_add(size) > self.max_bytes {
-            let Some(old_key) = self.files.keys().next().cloned() else {
-                return false;
-            };
-            if let Some(existing) = self.files.remove(&old_key) {
-                self.total_bytes = self.total_bytes.saturating_sub(existing.len());
-            }
-        }
-        self.total_bytes = self.total_bytes.saturating_add(size);
-        self.files.insert(key, bytes);
-        true
-    }
-}
-
-/// Returns the RAM byte-cache budget.
-fn file_bytes_cache_max_bytes() -> usize {
-    let mb = env::var("FILE_BYTES_CACHE_MAX_MB")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .or_else(|| {
-            env::var("AWS_LAMBDA_FUNCTION_MEMORY_SIZE")
-                .ok()
-                .and_then(|value| value.parse::<usize>().ok())
-                .map(|memory_mb| (memory_mb / 3).max(64))
-        })
-        .unwrap_or(512);
-    mb.saturating_mul(1024 * 1024)
-}
-
-/// Returns the `/tmp` byte-cache budget.
-fn file_disk_cache_max_bytes() -> u64 {
-    let mb = env::var("FILE_DISK_CACHE_MAX_MB")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(4_096);
-    mb.saturating_mul(1024 * 1024)
-}
-
-/// Reads original file bytes from the `/tmp` fallback cache.
-async fn read_disk_cached_file_bytes(key: &str) -> Option<Bytes> {
-    let path = disk_cache_path(key);
-    let bytes = tokio::fs::read(path).await.ok()?;
-    Some(Bytes::from(bytes))
-}
-
-/// Writes original file bytes into the bounded `/tmp` fallback cache.
-async fn write_disk_cached_file_bytes(key: &str, bytes: &Bytes) -> Result<()> {
-    let max_bytes = file_disk_cache_max_bytes();
-    if max_bytes == 0 || bytes.len() as u64 > max_bytes {
-        return Ok(());
-    }
-    let _guard = FILE_DISK_CACHE_LOCK.lock().await;
-    tokio::fs::create_dir_all(FILE_DISK_CACHE_DIR).await?;
-    let path = disk_cache_path(key);
-    if tokio::fs::metadata(&path).await.is_ok() {
-        tokio::fs::remove_file(&path).await.ok();
-    }
-    evict_disk_cache_to_fit(bytes.len() as u64, max_bytes).await?;
-    let tmp_path = path.with_extension(format!("tmp-{}", std::process::id()));
-    tokio::fs::write(&tmp_path, bytes).await?;
-    tokio::fs::rename(tmp_path, path).await?;
-    Ok(())
-}
-
-/// Removes old `/tmp` cached files until the incoming object can fit.
-async fn evict_disk_cache_to_fit(incoming_bytes: u64, max_bytes: u64) -> Result<()> {
-    let mut entries = disk_cache_entries().await?;
-    let mut total = entries.iter().map(|entry| entry.size).sum::<u64>();
-    if total.saturating_add(incoming_bytes) <= max_bytes {
-        return Ok(());
-    }
-    entries.sort_by_key(|entry| entry.modified);
-    for entry in entries {
-        if total.saturating_add(incoming_bytes) <= max_bytes {
-            break;
-        }
-        if tokio::fs::remove_file(&entry.path).await.is_ok() {
-            total = total.saturating_sub(entry.size);
-        }
-    }
-    Ok(())
-}
-
-/// Lists files currently present in the `/tmp` byte cache.
-async fn disk_cache_entries() -> Result<Vec<DiskCacheEntry>> {
-    let mut entries = Vec::new();
-    let mut dir = match tokio::fs::read_dir(FILE_DISK_CACHE_DIR).await {
-        Ok(dir) => dir,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(entries),
-        Err(error) => return Err(error.into()),
-    };
-    while let Some(entry) = dir.next_entry().await? {
-        let metadata = entry.metadata().await?;
-        if !metadata.is_file() {
-            continue;
-        }
-        entries.push(DiskCacheEntry {
-            path: entry.path(),
-            size: metadata.len(),
-            modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-        });
-    }
-    Ok(entries)
-}
-
-/// Metadata for one `/tmp` cache file.
-struct DiskCacheEntry {
-    path: PathBuf,
-    size: u64,
-    modified: SystemTime,
-}
-
-/// Builds a safe `/tmp` path for a cache key.
-fn disk_cache_path(key: &str) -> PathBuf {
-    let digest = Sha256::digest(key.as_bytes());
-    PathBuf::from(FILE_DISK_CACHE_DIR).join(hex::encode(digest))
 }
 
 /// Builds the Commons CirrusSearch query string.
@@ -1800,6 +1449,65 @@ mod tests {
     }
 
     #[test]
+    fn parses_imageinfo_fixture_metadata() {
+        let response: QueryResponse = serde_json::from_str(include_str!(
+            "../tests/fixtures/commons_imageinfo_baschi.json"
+        ))
+        .unwrap();
+
+        let hits = pages_to_hits(response.query.unwrap().pages);
+        let file = hits.first().unwrap();
+
+        assert_eq!(file.page_id, 12345);
+        assert_eq!(
+            file.file_name,
+            "Басши, урны у администрации Алтын-Эмеля.jpg"
+        );
+        assert_eq!(file.uploader.as_deref(), Some("Vitaly Zdanevich"));
+        assert_eq!(file.version_count, Some(2));
+        assert_eq!(file.license_short_name.as_deref(), Some("CC BY-SA 4.0"));
+        assert_eq!(
+            file.caption_text.as_deref(),
+            Some("Trash bins near the Altyn-Emel administration")
+        );
+        assert_eq!(
+            file.description_text.as_deref(),
+            Some("Trash bins near the office.")
+        );
+        assert_eq!(file.camera_model.as_deref(), Some("Canon EOS 6D"));
+        assert_eq!(file.exposure_time.as_deref(), Some("1/500 sec (0.002)"));
+        assert_eq!(file.f_number.as_deref(), Some("f/7.1"));
+        assert_eq!(file.iso_speed.as_deref(), Some("1,250"));
+        assert_eq!(file.focal_length.as_deref(), Some("50 mm"));
+        assert_eq!(file.coordinates.unwrap().lat, 44.112233);
+        assert_eq!(file.coordinates.unwrap().lon, 78.445566);
+    }
+
+    #[test]
+    fn parses_category_search_fixture() {
+        let response: CategorySearchResponse = serde_json::from_str(include_str!(
+            "../tests/fixtures/commons_category_search_minsk.json"
+        ))
+        .unwrap();
+
+        let categories = response
+            .query
+            .search
+            .into_iter()
+            .map(|hit| CategoryHit {
+                page_id: hit.pageid,
+                display_title: hit.title.trim_start_matches("Category:").to_string(),
+                title: hit.title,
+                file_count: None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(categories.len(), 2);
+        assert_eq!(categories[0].display_title, "Minsk");
+        assert_eq!(categories[1].display_title, "Buildings in Minsk");
+    }
+
+    #[test]
     fn local_filters_match_usernames_with_underscores() {
         let mut hits = vec![FileHit {
             uploader: Some("Vitaly Zdanevich".into()),
@@ -1833,31 +1541,6 @@ mod tests {
             choose_canonical_username("Красный", titles),
             Some("Красный".into())
         );
-    }
-
-    #[test]
-    fn bounded_insert_limits_cache_entries() {
-        let mut cache = HashMap::new();
-        bounded_insert(&mut cache, "a", 1, 2);
-        bounded_insert(&mut cache, "b", 2, 2);
-        bounded_insert(&mut cache, "c", 3, 2);
-
-        assert_eq!(cache.len(), 2);
-        assert_eq!(cache.get("c"), Some(&3));
-    }
-
-    #[test]
-    fn file_bytes_cache_skips_oversized_and_evicts_to_fit() {
-        let mut cache = FileBytesCache::new(5);
-
-        assert!(cache.insert("a".into(), Bytes::from_static(b"123")));
-        assert!(cache.insert("b".into(), Bytes::from_static(b"45")));
-        assert!(!cache.insert("huge".into(), Bytes::from_static(b"123456")));
-        assert!(cache.insert("c".into(), Bytes::from_static(b"abcde")));
-
-        assert_eq!(cache.total_bytes, 5);
-        assert_eq!(cache.get("c").as_deref(), Some(&b"abcde"[..]));
-        assert!(cache.get("huge").is_none());
     }
 
     #[test]
