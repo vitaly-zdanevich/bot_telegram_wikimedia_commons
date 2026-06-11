@@ -3,6 +3,7 @@
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=vitaly-zdanevich_bot_telegram_wikimedia_commons&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=vitaly-zdanevich_bot_telegram_wikimedia_commons)
 [![Code Quality](https://sonarcloud.io/api/project_badges/measure?project=vitaly-zdanevich_bot_telegram_wikimedia_commons&metric=sqale_rating)](https://sonarcloud.io/summary/new_code?id=vitaly-zdanevich_bot_telegram_wikimedia_commons)
 [![Coverage](https://sonarcloud.io/api/project_badges/measure?project=vitaly-zdanevich_bot_telegram_wikimedia_commons&metric=coverage)](https://sonarcloud.io/summary/new_code?id=vitaly-zdanevich_bot_telegram_wikimedia_commons)
+[![Lines of Code](https://sloc.xyz/github/vitaly-zdanevich/bot_telegram_wikimedia_commons)](https://sloc.xyz/github/vitaly-zdanevich/bot_telegram_wikimedia_commons)
 
 Unofficial Telegram bot and CLI for searching and reading Wikimedia Commons media.
 
