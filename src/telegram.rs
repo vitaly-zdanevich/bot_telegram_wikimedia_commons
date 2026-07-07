@@ -42,6 +42,8 @@ pub struct Message {
     pub from: Option<User>,
     /// Message text.
     pub text: Option<String>,
+    /// Shared user location, if the message is a Telegram location message.
+    pub location: Option<Location>,
 }
 
 /// Telegram chat subset.
@@ -87,7 +89,7 @@ pub struct InlineQuery {
     pub location: Option<Location>,
 }
 
-/// Telegram location subset included in inline queries.
+/// Telegram location subset included in inline queries and location messages.
 #[derive(Clone, Copy, Debug, Deserialize)]
 pub struct Location {
     /// Latitude in degrees.
@@ -208,6 +210,27 @@ impl TelegramClient {
         }
         self.send_category_buttons_with_title(chat_id, "Categories", categories, pagination_enabled)
             .await
+    }
+
+    /// Sends closest category buttons for a shared Telegram location.
+    pub async fn send_closest_category_buttons(
+        &self,
+        chat_id: i64,
+        categories: &[CategoryHit],
+        pagination_enabled: bool,
+    ) -> Result<()> {
+        if categories.is_empty() {
+            self.send_message(chat_id, "No nearby categories found.", None)
+                .await?;
+            return Ok(());
+        }
+        self.send_category_buttons_with_title(
+            chat_id,
+            "Closest categories",
+            categories,
+            pagination_enabled,
+        )
+        .await
     }
 
     /// Sends category result buttons with a custom heading.
@@ -1400,6 +1423,30 @@ mod tests {
         assert_eq!(location.latitude, 53.9023);
         assert_eq!(location.longitude, 27.5619);
         assert_eq!(location.horizontal_accuracy, Some(25.0));
+    }
+
+    #[test]
+    fn deserializes_message_location() {
+        let update: Update = serde_json::from_str(
+            r#"{
+                "update_id": 2,
+                "message": {
+                    "message_id": 10,
+                    "chat": {"id": 42},
+                    "from": {"id": 7},
+                    "location": {
+                        "latitude": 53.9023,
+                        "longitude": 27.5619
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let location = update.message.unwrap().location.unwrap();
+        assert_eq!(location.latitude, 53.9023);
+        assert_eq!(location.longitude, 27.5619);
+        assert_eq!(location.horizontal_accuracy, None);
     }
 
     #[test]

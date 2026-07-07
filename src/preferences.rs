@@ -124,6 +124,7 @@ fn item_to_preferences(item: &Value) -> Preferences {
         show_file_size: attr_bool(item, "show_file_size").unwrap_or(false),
         show_preview_metadata: attr_bool(item, "show_preview_metadata").unwrap_or(true),
         rich_image_previews: attr_bool(item, "rich_image_previews").unwrap_or(false),
+        category_file_buttons: attr_bool(item, "category_file_buttons").unwrap_or(false),
         pagination_enabled: attr_bool(item, "pagination_enabled").unwrap_or(true),
         inline_result_count: attr_usize(item, "inline_result_count")
             .map(normalize_inline_result_count)
@@ -153,6 +154,7 @@ fn preferences_to_item(telegram_user_id: i64, preferences: &Preferences) -> Valu
         "show_file_size": {"BOOL": preferences.show_file_size},
         "show_preview_metadata": {"BOOL": preferences.show_preview_metadata},
         "rich_image_previews": {"BOOL": preferences.rich_image_previews},
+        "category_file_buttons": {"BOOL": preferences.category_file_buttons},
         "pagination_enabled": {"BOOL": preferences.pagination_enabled},
         "inline_result_count": {"N": preferences.normalized_inline_result_count().to_string()},
         "pdf_mode": {"S": preferences.pdf_mode.as_pref_value()},
@@ -230,6 +232,7 @@ mod tests {
             show_file_size: true,
             show_preview_metadata: false,
             rich_image_previews: true,
+            category_file_buttons: true,
             pagination_enabled: false,
             inline_result_count: 10,
             pdf_mode: DocumentPageMode::RenderedPages,
@@ -250,6 +253,7 @@ mod tests {
         assert!(parsed.show_file_size);
         assert!(!parsed.show_preview_metadata);
         assert!(parsed.rich_image_previews);
+        assert!(parsed.category_file_buttons);
         assert!(!parsed.pagination_enabled);
         assert_eq!(parsed.inline_result_count, 10);
         assert_eq!(parsed.pdf_mode, DocumentPageMode::RenderedPages);
@@ -265,6 +269,7 @@ mod tests {
         let preferences = item_to_preferences(&item);
         assert!(preferences.show_preview_metadata);
         assert!(!preferences.rich_image_previews);
+        assert!(!preferences.category_file_buttons);
         assert!(preferences.pagination_enabled);
         assert_eq!(preferences.inline_result_count, DEFAULT_INLINE_RESULT_COUNT);
     }
@@ -283,6 +288,7 @@ mod tests {
             "show_file_size": {"BOOL": true},
             "show_preview_metadata": {"BOOL": false},
             "rich_image_previews": {"BOOL": true},
+            "category_file_buttons": {"BOOL": true},
             "pagination_enabled": {"BOOL": false},
             "inline_result_count": {"N": "17"},
             "pdf_mode": {"S": "bad"},
@@ -302,6 +308,7 @@ mod tests {
         assert!(preferences.show_file_size);
         assert!(!preferences.show_preview_metadata);
         assert!(preferences.rich_image_previews);
+        assert!(preferences.category_file_buttons);
         assert!(!preferences.pagination_enabled);
         assert_eq!(preferences.inline_result_count, DEFAULT_INLINE_RESULT_COUNT);
         assert_eq!(preferences.pdf_mode, DocumentPageMode::Original);

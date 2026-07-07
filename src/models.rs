@@ -178,6 +178,9 @@ pub struct Preferences {
     /// Whether image previews should be sent as one rich Telegram message.
     #[serde(default)]
     pub rich_image_previews: bool,
+    /// Whether category clicks should show file buttons instead of image previews.
+    #[serde(default)]
+    pub category_file_buttons: bool,
     /// Whether file/category button lists should include in-place pagination.
     #[serde(default = "default_true")]
     pub pagination_enabled: bool,
@@ -204,6 +207,7 @@ impl Default for Preferences {
             show_file_size: false,
             show_preview_metadata: true,
             rich_image_previews: false,
+            category_file_buttons: false,
             pagination_enabled: true,
             inline_result_count: DEFAULT_INLINE_RESULT_COUNT,
             pdf_mode: DocumentPageMode::Original,

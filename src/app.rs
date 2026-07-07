@@ -189,8 +189,22 @@ pub async fn handle_update(update: Update, config: &Config) -> Result<()> {
     if let Some(message) = update.message {
         let chat_id = message.chat.id;
         let user_id = message.from.as_ref().map(|user| user.id).unwrap_or(chat_id);
-        let text = message.text.unwrap_or_default();
         telegram.send_typing(chat_id).await.ok();
+        if let Some(location) = message.location {
+            let prefs = preferences.get(user_id).await;
+            let mut categories = commons
+                .search_nearby_categories(location.latitude, location.longitude, BUTTON_PAGE_SIZE)
+                .await?;
+            if prefs.show_category_counts {
+                enrich_category_counts(&commons, &mut categories).await;
+            }
+            telegram
+                .send_closest_category_buttons(chat_id, &categories, prefs.pagination_enabled)
+                .await?;
+            return Ok(());
+        }
+
+        let text = message.text.unwrap_or_default();
         if is_preferences_update_command(&text) {
             let current = preferences.get(user_id).await;
             let updated = update_preferences(&text, current);
@@ -355,10 +369,11 @@ pub async fn handle_update(update: Update, config: &Config) -> Result<()> {
                 .strip_prefix("cat:")
                 .and_then(|value| value.parse::<u64>().ok())
             {
+                let file_limit = category_file_result_limit(&prefs);
                 let mut category = commons
                     .category_info_by_page_id(
                         page_id,
-                        category_result_limit(&prefs),
+                        file_limit,
                         category_result_limit(&prefs),
                         config.max_file_bytes,
                     )
@@ -367,9 +382,7 @@ pub async fn handle_update(update: Update, config: &Config) -> Result<()> {
                 telegram
                     .send_message(chat_id, &format_category_info(&category), None)
                     .await?;
-                telegram
-                    .send_file_buttons(chat_id, &category.files, &prefs)
-                    .await?;
+                send_category_files(&telegram, chat_id, &category.files, &prefs).await?;
                 telegram
                     .send_subcategory_buttons(
                         chat_id,
@@ -679,6 +692,33 @@ fn category_result_limit(preferences: &Preferences) -> usize {
     }
 }
 
+/// Returns the file limit needed after a category button click.
+fn category_file_result_limit(preferences: &Preferences) -> usize {
+    if preferences.category_file_buttons {
+        category_result_limit(preferences)
+    } else {
+        BUTTON_PAGE_SIZE
+    }
+}
+
+/// Sends direct category files according to the category-file preference.
+async fn send_category_files(
+    telegram: &TelegramClient,
+    chat_id: i64,
+    files: &[FileHit],
+    preferences: &Preferences,
+) -> Result<()> {
+    if preferences.category_file_buttons {
+        telegram
+            .send_file_buttons(chat_id, files, preferences)
+            .await
+    } else {
+        telegram
+            .send_image_previews(chat_id, files, BUTTON_PAGE_SIZE, preferences, false)
+            .await
+    }
+}
+
 /// The currently visible preferences submenu.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PreferencesView {
@@ -799,6 +839,10 @@ fn apply_preference_callback(
         }
         "toggle:rich-previews" => {
             preferences.rich_image_previews = !preferences.rich_image_previews;
+            changed = true;
+        }
+        "toggle:category-file-buttons" => {
+            preferences.category_file_buttons = !preferences.category_file_buttons;
             changed = true;
         }
         "toggle:pagination" => {
@@ -952,6 +996,10 @@ fn main_preferences_keyboard(preferences: &Preferences) -> Vec<Vec<InlineKeyboar
                 "pref:toggle:rich-previews",
             ),
         ],
+        vec![pref_button(
+            toggle_label(preferences.category_file_buttons, "Category file buttons"),
+            "pref:toggle:category-file-buttons",
+        )],
         vec![
             pref_button(
                 toggle_label(preferences.show_sha1, "SHA-1"),
@@ -1154,6 +1202,12 @@ pub fn update_preferences(text: &str, mut preferences: Preferences) -> Preferenc
             ("preview-metadata" | "metadata", "off") => preferences.show_preview_metadata = false,
             ("rich-previews" | "rich", "on") => preferences.rich_image_previews = true,
             ("rich-previews" | "rich", "off") => preferences.rich_image_previews = false,
+            ("category-file-buttons" | "category-files", "on" | "buttons") => {
+                preferences.category_file_buttons = true;
+            }
+            ("category-file-buttons" | "category-files", "off" | "images") => {
+                preferences.category_file_buttons = false;
+            }
             ("pagination", "on") => preferences.pagination_enabled = true,
             ("pagination", "off") => preferences.pagination_enabled = false,
             ("inline" | "inline-count", value) => {
@@ -1219,13 +1273,14 @@ fn format_preferences(preferences: &Preferences, config: &Config) -> String {
         "saved in DynamoDB when configured"
     };
     format!(
-        "Preferences ({storage})\n\nCategory counts: {}\nMode: {}\nFile type: {}\nExtension: {}\nPreview metadata: {}\nRich previews: {}\nPagination: {}\nInline results: {}\nSHA-1: {}\nFile size in buttons: {}\nFavorites: {}\nCategory blacklist: {}\nUploader blacklist: {}\n\nUse the buttons below, or commands:\n/settings mode buttons|links10|images10|images20\n/settings type all|images|audio|video\n/settings ext jpg|webp|flac|pdf|off\n/settings category-counts on|off\n/settings preview-metadata on|off\n/settings rich-previews on|off\n/settings pagination on|off\n/settings inline 10|20|50\n/settings sha1 on|off\n/settings filesize on|off\n/settings favorite add Category name\n/settings blacklist-category add Category name\n/settings blacklist-user add Username\n\nAliases: /prefs, /preferences",
+        "Preferences ({storage})\n\nCategory counts: {}\nMode: {}\nFile type: {}\nExtension: {}\nPreview metadata: {}\nRich previews: {}\nCategory file buttons: {}\nPagination: {}\nInline results: {}\nSHA-1: {}\nFile size in buttons: {}\nFavorites: {}\nCategory blacklist: {}\nUploader blacklist: {}\n\nUse the buttons below, or commands:\n/settings mode buttons|links10|images10|images20\n/settings type all|images|audio|video\n/settings ext jpg|webp|flac|pdf|off\n/settings category-counts on|off\n/settings preview-metadata on|off\n/settings rich-previews on|off\n/settings category-file-buttons on|off\n/settings pagination on|off\n/settings inline 10|20|50\n/settings sha1 on|off\n/settings filesize on|off\n/settings favorite add Category name\n/settings blacklist-category add Category name\n/settings blacklist-user add Username\n\nAliases: /prefs, /preferences",
         yes_no(preferences.show_category_counts),
         preferences.delivery_mode.as_pref_value(),
         preferences.file_type.as_pref_value(),
         preferences.extension.as_deref().unwrap_or("none"),
         yes_no(preferences.show_preview_metadata),
         yes_no(preferences.rich_image_previews),
+        yes_no(preferences.category_file_buttons),
         yes_no(preferences.pagination_enabled),
         preferences.normalized_inline_result_count(),
         yes_no(preferences.show_sha1),
@@ -1247,7 +1302,7 @@ fn help_text(config: &Config, preferences: &Preferences) -> String {
         )
     };
     format!(
-        "<b>Wikimedia Commons bot</b>\n\nUnofficial Wikimedia Commons search bot. Source: <a href=\"{}\">{}</a>\nLicense: MIT\n\nSearch examples:\n<pre>Minsk\n-img Minsk\n-links Minsk\nimage Minsk\nbild Berlin\naudio:bird\nflac Minsk c birds\nUser:Vitaly_Zdanevich date:2025 Minsk\nuser:Vitaly_Zdanevich d:7days audio:something\ns:&gt;10MB s:&lt;20MB Minsk\nCategory Minsk\nKategorie Berlin\nКатегория Минск\nКатэгорыя Мінск</pre>\n\nAliases: category/c, Kategorie/kat/k, категория/катэгорыя/к/с; user/u/Benutzer; image/images/img/i, Bild/Bilder/Foto/Fotos, выява/ваява/в; audio/sound/music, Ton/Klang/Musik, аудио/музыка/звук/аудыё; date/d/Datum; size/s/Größe/Groesse/g. Use -img for Telegram image previews with metadata captions, -links for 10 compact links, and /settings to open preferences. Preview metadata and button pagination are enabled by default and can be disabled in /settings. Rich previews can be enabled in /settings to send one Telegram rich message with photos and text together.\n\nInline mode can use Telegram's shared location to show nearby geotagged images. Without location, or with structured filters like user:, category, date, size, or extension, it searches by your typed query. Inline result count can be set in /settings to 10, 20, or 50 for slower networks.\n\nClick file buttons to receive the file with metadata, license, uploader, date, source link, geolocation when available, and upload version count. Telegram bot uploads are limited to 50 MB, so larger files are filtered out. Files larger than 20 MB use red buttons; audio uses blue buttons.\n\nUpload your own free photos, audio, video, and other files to Wikimedia Commons: <a href=\"https://commons.wikimedia.org/wiki/Special:UploadWizard\">Upload Wizard</a>. Many upload tools are listed at <a href=\"https://commons.wikimedia.org/wiki/Commons:Upload_tools\">Commons upload tools</a>. Storage is unlimited, and all files are public.\n\nSupport: @vitaly_zdanevich\n\nAWS free-tier docs: <a href=\"https://aws.amazon.com/lambda/pricing/\">Lambda</a>, <a href=\"https://aws.amazon.com/dynamodb/pricing/\">DynamoDB</a>.{favorites}",
+        "<b>Wikimedia Commons bot</b>\n\nUnofficial Wikimedia Commons search bot. Source: <a href=\"{}\">{}</a>\nLicense: MIT\n\nSearch examples:\n<pre>Minsk\n-img Minsk\n-links Minsk\nimage Minsk\nbild Berlin\naudio:bird\nflac Minsk c birds\nUser:Vitaly_Zdanevich date:2025 Minsk\nuser:Vitaly_Zdanevich d:7days audio:something\ns:&gt;10MB s:&lt;20MB Minsk\nCategory Minsk\nKategorie Berlin\nКатегория Минск\nКатэгорыя Мінск</pre>\n\nAliases: category/c, Kategorie/kat/k, категория/катэгорыя/к/с; user/u/Benutzer; image/images/img/i, Bild/Bilder/Foto/Fotos, выява/ваява/в; audio/sound/music, Ton/Klang/Musik, аудио/музыка/звук/аудыё; date/d/Datum; size/s/Größe/Groesse/g. Use -img for Telegram image previews with metadata captions, -links for 10 compact links, and /settings to open preferences. Preview metadata and button pagination are enabled by default and can be disabled in /settings. Rich previews can be enabled in /settings to send one Telegram rich message with photos and text together.\n\nCategory buttons show category info first, then up to 20 direct image previews with captions, then subcategories. Filename buttons for category files can be enabled in /settings.\n\nSend your current Telegram location to get up to 20 closest Wikimedia Commons category buttons. Inline mode can use Telegram's shared location to show nearby geotagged images. Without location, or with structured filters like user:, category, date, size, or extension, it searches by your typed query. Inline result count can be set in /settings to 10, 20, or 50 for slower networks.\n\nClick file buttons to receive the file with metadata, license, uploader, date, source link, geolocation when available, and upload version count. Telegram bot uploads are limited to 50 MB, so larger files are filtered out. Files larger than 20 MB use red buttons; audio uses blue buttons.\n\nUpload your own free photos, audio, video, and other files to Wikimedia Commons: <a href=\"https://commons.wikimedia.org/wiki/Special:UploadWizard\">Upload Wizard</a>. Many upload tools are listed at <a href=\"https://commons.wikimedia.org/wiki/Commons:Upload_tools\">Commons upload tools</a>. Storage is unlimited, and all files are public.\n\nSupport: @vitaly_zdanevich\n\nAWS free-tier docs: <a href=\"https://aws.amazon.com/lambda/pricing/\">Lambda</a>, <a href=\"https://aws.amazon.com/dynamodb/pricing/\">DynamoDB</a>.{favorites}",
         config.github_url, config.github_url
     )
 }
@@ -1272,11 +1327,12 @@ fn yes_no(value: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExtensionGroup, PreferencesView, apply_preference_callback, category_result_limit,
-        checked_label, extension_group_for, file_result_limit, format_preferences, help_text,
-        idempotency_keys, inline_location_applies, inline_lookup_limit, inline_result_page,
-        is_expired_inline_query_error, is_preferences_update_command, parse_inline_offset,
-        parse_pagination_callback, preferences_keyboard, toggle_label, update_preferences,
+        ExtensionGroup, PreferencesView, apply_preference_callback, category_file_result_limit,
+        category_result_limit, checked_label, extension_group_for, file_result_limit,
+        format_preferences, help_text, idempotency_keys, inline_location_applies,
+        inline_lookup_limit, inline_result_page, is_expired_inline_query_error,
+        is_preferences_update_command, parse_inline_offset, parse_pagination_callback,
+        preferences_keyboard, toggle_label, update_preferences,
     };
     use crate::config::Config;
     use crate::models::{
@@ -1324,6 +1380,8 @@ mod tests {
         assert!(!prefs.show_preview_metadata);
         let prefs = update_preferences("/prefs rich-previews on", prefs);
         assert!(prefs.rich_image_previews);
+        let prefs = update_preferences("/prefs category-file-buttons on", prefs);
+        assert!(prefs.category_file_buttons);
         let prefs = update_preferences("/prefs pagination off", prefs);
         assert!(!prefs.pagination_enabled);
         let prefs = update_preferences("/prefs inline 10", prefs);
@@ -1374,6 +1432,8 @@ mod tests {
         assert!(!prefs.show_preview_metadata);
         let prefs = update_preferences("/settings rich off", prefs);
         assert!(!prefs.rich_image_previews);
+        let prefs = update_preferences("/settings category-files images", prefs);
+        assert!(!prefs.category_file_buttons);
 
         let prefs = update_preferences(
             "/settings ext off",
@@ -1405,6 +1465,7 @@ mod tests {
                     chat: Chat { id: -100 },
                     from: None,
                     text: None,
+                    location: None,
                 }),
                 data: Some("file:99".into()),
             }),
@@ -1431,6 +1492,7 @@ mod tests {
                     chat: Chat { id: -100 },
                     from: None,
                     text: None,
+                    location: None,
                 }),
                 data: Some("pg:f:token:1".into()),
             }),
@@ -1454,6 +1516,8 @@ mod tests {
         assert!(text.contains("Search examples:\n<pre>Minsk"));
         assert!(text.contains("Катэгорыя Мінск</pre>"));
         assert!(text.contains("Rich previews can be enabled in /settings"));
+        assert!(text.contains("Category buttons show category info first"));
+        assert!(text.contains("Send your current Telegram location"));
     }
 
     #[test]
@@ -1577,6 +1641,7 @@ mod tests {
         assert!(labels.contains(&"✅ Images"));
         assert!(labels.contains(&"✅ SHA-1"));
         assert!(labels.contains(&"✅ Preview metadata"));
+        assert!(labels.contains(&"Category file buttons"));
         assert!(labels.contains(&"✅ Pagination"));
         assert!(labels.contains(&"✅ Inline 50"));
         assert!(labels.contains(&"Extension: webp"));
@@ -1643,6 +1708,15 @@ mod tests {
             apply_preference_callback("toggle:rich-previews", Preferences::default()).unwrap();
         assert!(result.changed);
         assert!(result.preferences.rich_image_previews);
+    }
+
+    #[test]
+    fn toggles_category_file_buttons_callback() {
+        let result =
+            apply_preference_callback("toggle:category-file-buttons", Preferences::default())
+                .unwrap();
+        assert!(result.changed);
+        assert!(result.preferences.category_file_buttons);
     }
 
     #[test]
@@ -1747,6 +1821,7 @@ mod tests {
         let prefs = Preferences::default();
         assert_eq!(file_result_limit(&SearchQuery::default(), &prefs), 60);
         assert_eq!(category_result_limit(&prefs), 60);
+        assert_eq!(category_file_result_limit(&prefs), 20);
 
         let image_query = SearchQuery {
             image_previews_flag: true,
@@ -1763,6 +1838,12 @@ mod tests {
             20
         );
         assert_eq!(category_result_limit(&no_pagination), 20);
+
+        let category_file_buttons = Preferences {
+            category_file_buttons: true,
+            ..Preferences::default()
+        };
+        assert_eq!(category_file_result_limit(&category_file_buttons), 60);
     }
 
     #[test]
@@ -1789,12 +1870,14 @@ mod tests {
         assert!(text.contains("File type: audio"));
         assert!(text.contains("Extension: flac"));
         assert!(text.contains("Rich previews: no"));
+        assert!(text.contains("Category file buttons: no"));
         assert!(text.contains("Inline results: 10"));
         assert!(text.contains("Favorites: Minsk"));
         assert!(text.contains("Category blacklist: Low quality scans"));
         assert!(text.contains("Uploader blacklist: Example_User"));
         assert!(text.contains("/settings inline 10|20|50"));
         assert!(text.contains("/settings rich-previews on|off"));
+        assert!(text.contains("/settings category-file-buttons on|off"));
     }
 
     #[test]

@@ -225,6 +225,42 @@ impl CommonsClient {
         Ok(hits)
     }
 
+    /// Searches geotagged Commons categories nearest to a latitude/longitude pair.
+    pub async fn search_nearby_categories(
+        &self,
+        latitude: f64,
+        longitude: f64,
+        limit: usize,
+    ) -> Result<Vec<CategoryHit>> {
+        let cache_key = format!("nearby-categories:{latitude:.5}:{longitude:.5}:{limit}");
+        if let Some(cached) = cached_category_search(&cache_key).await {
+            return Ok(cached);
+        }
+        let mut url = Url::parse(&self.api_url)?;
+        url.query_pairs_mut()
+            .append_pair("action", "query")
+            .append_pair("format", "json")
+            .append_pair("formatversion", "2")
+            .append_pair("list", "geosearch")
+            .append_pair("gsnamespace", "14")
+            .append_pair("gscoord", &format!("{latitude}|{longitude}"))
+            .append_pair("gsradius", &NEARBY_SEARCH_RADIUS_METERS.to_string())
+            .append_pair("gslimit", &limit.to_string());
+
+        let response = self.get_json::<GeoSearchResponse>(url).await?;
+        let categories = geosearch_hits_to_categories(
+            response
+                .query
+                .map(|query| query.geosearch)
+                .unwrap_or_default(),
+        )
+        .into_iter()
+        .take(limit)
+        .collect::<Vec<_>>();
+        remember_category_search(cache_key, categories.clone()).await;
+        Ok(categories)
+    }
+
     /// Lists recent files by uploader and applies the same local filters as search.
     async fn search_files_by_uploader(
         &self,
@@ -1387,6 +1423,22 @@ struct GeoSearchQuery {
 #[derive(Debug, Deserialize)]
 struct GeoSearchHit {
     pageid: u64,
+    title: Option<String>,
+}
+
+/// Converts GeoData search hits into category button models, preserving distance order.
+fn geosearch_hits_to_categories(hits: Vec<GeoSearchHit>) -> Vec<CategoryHit> {
+    hits.into_iter()
+        .filter_map(|hit| {
+            let title = hit.title?;
+            Some(CategoryHit {
+                page_id: hit.pageid,
+                display_title: title.trim_start_matches("Category:").to_string(),
+                title,
+                file_count: None,
+            })
+        })
+        .collect()
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1512,6 +1564,31 @@ mod tests {
         assert_eq!(categories.len(), 2);
         assert_eq!(categories[0].display_title, "Minsk");
         assert_eq!(categories[1].display_title, "Buildings in Minsk");
+    }
+
+    #[test]
+    fn converts_geosearch_hits_to_categories() {
+        let categories = geosearch_hits_to_categories(vec![
+            GeoSearchHit {
+                pageid: 10,
+                title: Some("Category:Closest".into()),
+            },
+            GeoSearchHit {
+                pageid: 11,
+                title: None,
+            },
+            GeoSearchHit {
+                pageid: 12,
+                title: Some("Category:Farther".into()),
+            },
+        ]);
+
+        assert_eq!(categories.len(), 2);
+        assert_eq!(categories[0].page_id, 10);
+        assert_eq!(categories[0].title, "Category:Closest");
+        assert_eq!(categories[0].display_title, "Closest");
+        assert_eq!(categories[1].page_id, 12);
+        assert_eq!(categories[1].display_title, "Farther");
     }
 
     #[test]
