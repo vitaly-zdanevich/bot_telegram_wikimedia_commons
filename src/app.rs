@@ -797,6 +797,10 @@ fn apply_preference_callback(
             preferences.show_preview_metadata = !preferences.show_preview_metadata;
             changed = true;
         }
+        "toggle:rich-previews" => {
+            preferences.rich_image_previews = !preferences.rich_image_previews;
+            changed = true;
+        }
         "toggle:pagination" => {
             preferences.pagination_enabled = !preferences.pagination_enabled;
             changed = true;
@@ -944,14 +948,20 @@ fn main_preferences_keyboard(preferences: &Preferences) -> Vec<Vec<InlineKeyboar
                 "pref:toggle:preview-metadata",
             ),
             pref_button(
+                toggle_label(preferences.rich_image_previews, "Rich previews"),
+                "pref:toggle:rich-previews",
+            ),
+        ],
+        vec![
+            pref_button(
                 toggle_label(preferences.show_sha1, "SHA-1"),
                 "pref:toggle:sha1",
             ),
+            pref_button(
+                toggle_label(preferences.pagination_enabled, "Pagination"),
+                "pref:toggle:pagination",
+            ),
         ],
-        vec![pref_button(
-            toggle_label(preferences.pagination_enabled, "Pagination"),
-            "pref:toggle:pagination",
-        )],
         INLINE_RESULT_COUNT_OPTIONS
             .iter()
             .map(|count| {
@@ -1142,6 +1152,8 @@ pub fn update_preferences(text: &str, mut preferences: Preferences) -> Preferenc
             ("filesize", "off") => preferences.show_file_size = false,
             ("preview-metadata" | "metadata", "on") => preferences.show_preview_metadata = true,
             ("preview-metadata" | "metadata", "off") => preferences.show_preview_metadata = false,
+            ("rich-previews" | "rich", "on") => preferences.rich_image_previews = true,
+            ("rich-previews" | "rich", "off") => preferences.rich_image_previews = false,
             ("pagination", "on") => preferences.pagination_enabled = true,
             ("pagination", "off") => preferences.pagination_enabled = false,
             ("inline" | "inline-count", value) => {
@@ -1207,12 +1219,13 @@ fn format_preferences(preferences: &Preferences, config: &Config) -> String {
         "saved in DynamoDB when configured"
     };
     format!(
-        "Preferences ({storage})\n\nCategory counts: {}\nMode: {}\nFile type: {}\nExtension: {}\nPreview metadata: {}\nPagination: {}\nInline results: {}\nSHA-1: {}\nFile size in buttons: {}\nFavorites: {}\nCategory blacklist: {}\nUploader blacklist: {}\n\nUse the buttons below, or commands:\n/settings mode buttons|links10|images10|images20\n/settings type all|images|audio|video\n/settings ext jpg|webp|flac|pdf|off\n/settings category-counts on|off\n/settings preview-metadata on|off\n/settings pagination on|off\n/settings inline 10|20|50\n/settings sha1 on|off\n/settings filesize on|off\n/settings favorite add Category name\n/settings blacklist-category add Category name\n/settings blacklist-user add Username\n\nAliases: /prefs, /preferences",
+        "Preferences ({storage})\n\nCategory counts: {}\nMode: {}\nFile type: {}\nExtension: {}\nPreview metadata: {}\nRich previews: {}\nPagination: {}\nInline results: {}\nSHA-1: {}\nFile size in buttons: {}\nFavorites: {}\nCategory blacklist: {}\nUploader blacklist: {}\n\nUse the buttons below, or commands:\n/settings mode buttons|links10|images10|images20\n/settings type all|images|audio|video\n/settings ext jpg|webp|flac|pdf|off\n/settings category-counts on|off\n/settings preview-metadata on|off\n/settings rich-previews on|off\n/settings pagination on|off\n/settings inline 10|20|50\n/settings sha1 on|off\n/settings filesize on|off\n/settings favorite add Category name\n/settings blacklist-category add Category name\n/settings blacklist-user add Username\n\nAliases: /prefs, /preferences",
         yes_no(preferences.show_category_counts),
         preferences.delivery_mode.as_pref_value(),
         preferences.file_type.as_pref_value(),
         preferences.extension.as_deref().unwrap_or("none"),
         yes_no(preferences.show_preview_metadata),
+        yes_no(preferences.rich_image_previews),
         yes_no(preferences.pagination_enabled),
         preferences.normalized_inline_result_count(),
         yes_no(preferences.show_sha1),
@@ -1234,7 +1247,7 @@ fn help_text(config: &Config, preferences: &Preferences) -> String {
         )
     };
     format!(
-        "<b>Wikimedia Commons bot</b>\n\nUnofficial Wikimedia Commons search bot. Source: <a href=\"{}\">{}</a>\nLicense: MIT\n\nSearch examples:\n<pre>Minsk\n-img Minsk\n-links Minsk\nimage Minsk\nbild Berlin\naudio:bird\nflac Minsk c birds\nUser:Vitaly_Zdanevich date:2025 Minsk\nuser:Vitaly_Zdanevich d:7days audio:something\ns:&gt;10MB s:&lt;20MB Minsk\nCategory Minsk\nKategorie Berlin\nКатегория Минск\nКатэгорыя Мінск</pre>\n\nAliases: category/c, Kategorie/kat/k, категория/катэгорыя/к/с; user/u/Benutzer; image/images/img/i, Bild/Bilder/Foto/Fotos, выява/ваява/в; audio/sound/music, Ton/Klang/Musik, аудио/музыка/звук/аудыё; date/d/Datum; size/s/Größe/Groesse/g. Use -img for Telegram image previews with metadata captions, -links for 10 compact links, and /settings to open preferences. Preview metadata and button pagination are enabled by default and can be disabled in /settings.\n\nInline mode can use Telegram's shared location to show nearby geotagged images. Without location, or with structured filters like user:, category, date, size, or extension, it searches by your typed query. Inline result count can be set in /settings to 10, 20, or 50 for slower networks.\n\nClick file buttons to receive the file with metadata, license, uploader, date, source link, geolocation when available, and upload version count. Telegram bot uploads are limited to 50 MB, so larger files are filtered out. Files larger than 20 MB use red buttons; audio uses blue buttons.\n\nUpload your own free photos, audio, video, and other files to Wikimedia Commons: <a href=\"https://commons.wikimedia.org/wiki/Special:UploadWizard\">Upload Wizard</a>. Many upload tools are listed at <a href=\"https://commons.wikimedia.org/wiki/Commons:Upload_tools\">Commons upload tools</a>. Storage is unlimited, and all files are public.\n\nSupport: @vitaly_zdanevich\n\nAWS free-tier docs: <a href=\"https://aws.amazon.com/lambda/pricing/\">Lambda</a>, <a href=\"https://aws.amazon.com/dynamodb/pricing/\">DynamoDB</a>.{favorites}",
+        "<b>Wikimedia Commons bot</b>\n\nUnofficial Wikimedia Commons search bot. Source: <a href=\"{}\">{}</a>\nLicense: MIT\n\nSearch examples:\n<pre>Minsk\n-img Minsk\n-links Minsk\nimage Minsk\nbild Berlin\naudio:bird\nflac Minsk c birds\nUser:Vitaly_Zdanevich date:2025 Minsk\nuser:Vitaly_Zdanevich d:7days audio:something\ns:&gt;10MB s:&lt;20MB Minsk\nCategory Minsk\nKategorie Berlin\nКатегория Минск\nКатэгорыя Мінск</pre>\n\nAliases: category/c, Kategorie/kat/k, категория/катэгорыя/к/с; user/u/Benutzer; image/images/img/i, Bild/Bilder/Foto/Fotos, выява/ваява/в; audio/sound/music, Ton/Klang/Musik, аудио/музыка/звук/аудыё; date/d/Datum; size/s/Größe/Groesse/g. Use -img for Telegram image previews with metadata captions, -links for 10 compact links, and /settings to open preferences. Preview metadata and button pagination are enabled by default and can be disabled in /settings. Rich previews can be enabled in /settings to send one Telegram rich message with photos and text together.\n\nInline mode can use Telegram's shared location to show nearby geotagged images. Without location, or with structured filters like user:, category, date, size, or extension, it searches by your typed query. Inline result count can be set in /settings to 10, 20, or 50 for slower networks.\n\nClick file buttons to receive the file with metadata, license, uploader, date, source link, geolocation when available, and upload version count. Telegram bot uploads are limited to 50 MB, so larger files are filtered out. Files larger than 20 MB use red buttons; audio uses blue buttons.\n\nUpload your own free photos, audio, video, and other files to Wikimedia Commons: <a href=\"https://commons.wikimedia.org/wiki/Special:UploadWizard\">Upload Wizard</a>. Many upload tools are listed at <a href=\"https://commons.wikimedia.org/wiki/Commons:Upload_tools\">Commons upload tools</a>. Storage is unlimited, and all files are public.\n\nSupport: @vitaly_zdanevich\n\nAWS free-tier docs: <a href=\"https://aws.amazon.com/lambda/pricing/\">Lambda</a>, <a href=\"https://aws.amazon.com/dynamodb/pricing/\">DynamoDB</a>.{favorites}",
         config.github_url, config.github_url
     )
 }
@@ -1309,6 +1322,8 @@ mod tests {
         assert!(prefs.show_sha1);
         let prefs = update_preferences("/prefs preview-metadata off", prefs);
         assert!(!prefs.show_preview_metadata);
+        let prefs = update_preferences("/prefs rich-previews on", prefs);
+        assert!(prefs.rich_image_previews);
         let prefs = update_preferences("/prefs pagination off", prefs);
         assert!(!prefs.pagination_enabled);
         let prefs = update_preferences("/prefs inline 10", prefs);
@@ -1357,6 +1372,8 @@ mod tests {
         assert!(prefs.show_file_size);
         let prefs = update_preferences("/settings metadata off", prefs);
         assert!(!prefs.show_preview_metadata);
+        let prefs = update_preferences("/settings rich off", prefs);
+        assert!(!prefs.rich_image_previews);
 
         let prefs = update_preferences(
             "/settings ext off",
@@ -1436,6 +1453,7 @@ mod tests {
         assert!(text.contains("Support: @vitaly_zdanevich"));
         assert!(text.contains("Search examples:\n<pre>Minsk"));
         assert!(text.contains("Катэгорыя Мінск</pre>"));
+        assert!(text.contains("Rich previews can be enabled in /settings"));
     }
 
     #[test]
@@ -1620,6 +1638,14 @@ mod tests {
     }
 
     #[test]
+    fn toggles_rich_previews_callback() {
+        let result =
+            apply_preference_callback("toggle:rich-previews", Preferences::default()).unwrap();
+        assert!(result.changed);
+        assert!(result.preferences.rich_image_previews);
+    }
+
+    #[test]
     fn toggles_pagination_callback() {
         let result =
             apply_preference_callback("toggle:pagination", Preferences::default()).unwrap();
@@ -1762,11 +1788,13 @@ mod tests {
         assert!(text.contains("Mode: images20"));
         assert!(text.contains("File type: audio"));
         assert!(text.contains("Extension: flac"));
+        assert!(text.contains("Rich previews: no"));
         assert!(text.contains("Inline results: 10"));
         assert!(text.contains("Favorites: Minsk"));
         assert!(text.contains("Category blacklist: Low quality scans"));
         assert!(text.contains("Uploader blacklist: Example_User"));
         assert!(text.contains("/settings inline 10|20|50"));
+        assert!(text.contains("/settings rich-previews on|off"));
     }
 
     #[test]

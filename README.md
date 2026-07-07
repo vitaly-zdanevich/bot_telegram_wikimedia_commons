@@ -58,7 +58,7 @@ Aliases:
 
 Telegram max bot file size is 50 MB, so the bot filters out bigger files by default. Files above 20 MB use red buttons because the bot must download and upload them itself. Audio buttons use blue styling where Telegram clients support button styles.
 
-Use `-img` to get one Telegram media group with up to 10 thumbnail previews and metadata captions. The bot uses 1280px Commons thumbnails for safer Telegram delivery and does not send extra overflow metadata messages for explicit `-img`. Use `-links` to get 10 compact Commons links in one message.
+Use `-img` to get up to 10 Telegram photo messages with metadata captions attached to each photo. The bot uses 1280px Commons thumbnails for safer Telegram delivery and keeps captions under Telegram's 1024-character photo-caption limit. Use `-links` to get 10 compact Commons links in one message. Enable rich previews in `/settings` to send one Telegram rich message with photos and text together.
 
 Inline mode works without location sharing. If Telegram sends inline location data, nearby geotagged images are ranked by distance and the typed text still filters file titles. Structured filters such as `user:`, category, date, size, extension, or audio/video type keep the normal Commons search path. The inline result count can be set to 10, 20, or 50 for slower networks.
 
@@ -72,6 +72,7 @@ Inline mode works without location sharing. If Telegram sends inline location da
 /settings ext jpg|webp|flac|pdf|off
 /settings category-counts on|off
 /settings preview-metadata on|off
+/settings rich-previews on|off
 /settings pagination on|off
 /settings inline 10|20|50
 /settings sha1 on|off

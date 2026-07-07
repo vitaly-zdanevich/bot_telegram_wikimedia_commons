@@ -175,6 +175,9 @@ pub struct Preferences {
     /// Whether `-img` preview captions include file metadata.
     #[serde(default = "default_true")]
     pub show_preview_metadata: bool,
+    /// Whether image previews should be sent as one rich Telegram message.
+    #[serde(default)]
+    pub rich_image_previews: bool,
     /// Whether file/category button lists should include in-place pagination.
     #[serde(default = "default_true")]
     pub pagination_enabled: bool,
@@ -200,6 +203,7 @@ impl Default for Preferences {
             show_sha1: false,
             show_file_size: false,
             show_preview_metadata: true,
+            rich_image_previews: false,
             pagination_enabled: true,
             inline_result_count: DEFAULT_INLINE_RESULT_COUNT,
             pdf_mode: DocumentPageMode::Original,

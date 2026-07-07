@@ -3,7 +3,7 @@ use crate::models::{
     CategoryHit, CategoryInfo, DeliveryMode, FileHit, Preferences, TELEGRAM_REMOTE_URL_LIMIT_BYTES,
 };
 use crate::pagination::{BUTTON_PAGE_SIZE, page_count, store_category_list, store_file_list};
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use reqwest::{Client, multipart};
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +15,8 @@ const TELEGRAM_PHOTO_MAX_DIMENSION_SUM: u64 = 10_000;
 const TELEGRAM_PHOTO_MAX_ASPECT_RATIO: f64 = 20.0;
 /// Telegram's documented photo caption limit after entity parsing.
 const TELEGRAM_PHOTO_CAPTION_LIMIT_CHARS: usize = 1024;
+/// Telegram's documented rich message text limit.
+const TELEGRAM_RICH_MESSAGE_LIMIT_CHARS: usize = 32_768;
 
 /// Telegram update subset handled by this bot.
 #[derive(Clone, Debug, Deserialize)]
@@ -270,14 +272,14 @@ impl TelegramClient {
         self.send_message(chat_id, &text, None).await
     }
 
-    /// Sends image previews as one or more media groups.
+    /// Sends image previews using the configured Telegram preview layout.
     pub async fn send_image_previews(
         &self,
         chat_id: i64,
         files: &[FileHit],
         max_images: usize,
         preferences: &Preferences,
-        send_overflow_metadata: bool,
+        _send_overflow_metadata: bool,
     ) -> Result<()> {
         let image_files = files
             .iter()
@@ -288,55 +290,66 @@ impl TelegramClient {
             self.send_plain_files(chat_id, files).await?;
             return Ok(());
         }
-        for chunk in image_files.chunks(10) {
-            let media = chunk
-                .iter()
-                .filter_map(|file| {
-                    let media_url = telegram_preview_url(file)?;
-                    let caption = telegram_photo_caption(file, preferences)?;
-                    Some(serde_json::json!({
-                        "type": "photo",
-                        "media": media_url,
-                        "caption": caption,
-                        "parse_mode": "HTML"
-                    }))
-                })
-                .collect::<Vec<_>>();
+
+        if preferences.rich_image_previews {
+            match self
+                .send_rich_image_previews(chat_id, &image_files, preferences)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(error) => tracing::warn!(
+                    error = %format!("{error:#}"),
+                    "sendRichMessage failed; falling back to individual photos"
+                ),
+            }
+        }
+
+        self.send_individual_photo_previews(chat_id, &image_files, preferences)
+            .await
+    }
+
+    /// Sends one Telegram rich message with image blocks and metadata captions.
+    async fn send_rich_image_previews(
+        &self,
+        chat_id: i64,
+        files: &[&FileHit],
+        preferences: &Preferences,
+    ) -> Result<()> {
+        let html = rich_image_preview_html(files, preferences);
+        ensure!(!html.is_empty(), "no rich image previews to send");
+        self.post_json(
+            "sendRichMessage",
+            &serde_json::json!({
+                "chat_id": chat_id,
+                "rich_message": {
+                    "html": html,
+                    "skip_entity_detection": true
+                }
+            }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Sends previews as individual photos so each caption stays attached to its image.
+    async fn send_individual_photo_previews(
+        &self,
+        chat_id: i64,
+        files: &[&FileHit],
+        preferences: &Preferences,
+    ) -> Result<()> {
+        for file in files {
             if let Err(error) = self
-                .post_json(
-                    "sendMediaGroup",
-                    &serde_json::json!({"chat_id": chat_id, "media": media}),
-                )
+                .send_single_photo_preview(chat_id, file, preferences)
                 .await
             {
                 tracing::warn!(
+                    file = %file.file_name,
                     error = %format!("{error:#}"),
-                    "sendMediaGroup failed; falling back to individual photos"
+                    "sendPhoto failed; falling back to a plain Commons link"
                 );
-                for file in chunk {
-                    if let Err(error) = self
-                        .send_single_photo_preview(
-                            chat_id,
-                            file,
-                            preferences,
-                            send_overflow_metadata,
-                        )
-                        .await
-                    {
-                        tracing::warn!(
-                            file = %file.file_name,
-                            error = %format!("{error:#}"),
-                            "sendPhoto failed; falling back to a plain Commons link"
-                        );
-                        if let Some(link) = file_link(file) {
-                            self.send_message(chat_id, &link, None).await?;
-                        }
-                    }
-                }
-            } else {
-                if send_overflow_metadata {
-                    self.send_overflow_preview_metadata(chat_id, chunk, preferences)
-                        .await?;
+                if let Some(link) = file_link(file) {
+                    self.send_message(chat_id, &link, None).await?;
                 }
             }
         }
@@ -349,7 +362,6 @@ impl TelegramClient {
         chat_id: i64,
         file: &FileHit,
         preferences: &Preferences,
-        send_overflow_metadata: bool,
     ) -> Result<()> {
         let caption =
             telegram_photo_caption(file, preferences).context("file has no Commons URL")?;
@@ -367,13 +379,7 @@ impl TelegramClient {
                 )
                 .await
             {
-                Ok(_) => {
-                    if send_overflow_metadata {
-                        self.send_overflow_preview_metadata(chat_id, &[file], preferences)
-                            .await?;
-                    }
-                    return Ok(());
-                }
+                Ok(_) => return Ok(()),
                 Err(error) => last_error = Some(error),
             }
         }
@@ -381,25 +387,6 @@ impl TelegramClient {
             Some(error) => Err(error),
             None => bail!("file has no Telegram-compatible image preview URL"),
         }
-    }
-
-    /// Sends full metadata as separate messages when photo captions must be shortened.
-    async fn send_overflow_preview_metadata(
-        &self,
-        chat_id: i64,
-        files: &[&FileHit],
-        preferences: &Preferences,
-    ) -> Result<()> {
-        if !preferences.show_preview_metadata {
-            return Ok(());
-        }
-        for file in files {
-            let metadata = format_file_metadata(file, preferences);
-            if caption_exceeds_photo_limit(&metadata) {
-                self.send_message(chat_id, &metadata, None).await?;
-            }
-        }
-        Ok(())
     }
 
     /// Answers a callback query to stop Telegram's progress indicator.
@@ -518,15 +505,67 @@ fn telegram_photo_caption(file: &FileHit, preferences: &Preferences) -> Option<S
     }
     let caption = format_file_metadata(file, preferences);
     if caption_exceeds_photo_limit(&caption) {
-        Some(compact_file_metadata_caption(file, preferences))
+        Some(fit_file_metadata_photo_caption(file, preferences))
     } else {
         Some(caption)
     }
 }
 
+/// Fits metadata into a Telegram photo caption before using stronger compaction.
+fn fit_file_metadata_photo_caption(file: &FileHit, preferences: &Preferences) -> String {
+    let mut lines = format_file_metadata_lines(file, preferences);
+    if let Some(caption) = drop_low_priority_metadata_lines_until_fit(&mut lines) {
+        return caption;
+    }
+    compact_file_metadata_caption(file, preferences)
+}
+
 /// Returns true when a caption should not be sent as a Telegram photo caption.
 fn caption_exceeds_photo_limit(caption: &str) -> bool {
     caption.chars().count() > TELEGRAM_PHOTO_CAPTION_LIMIT_CHARS
+}
+
+/// Builds rich HTML with image blocks and metadata text below every image.
+fn rich_image_preview_html(files: &[&FileHit], preferences: &Preferences) -> String {
+    let mut html = String::new();
+    for file in files {
+        let Some(media_url) = telegram_preview_url(file) else {
+            continue;
+        };
+        let caption = if preferences.show_preview_metadata {
+            format_file_metadata(file, preferences)
+        } else {
+            file_link(file).unwrap_or_else(|| escape_text(&file.file_name))
+        };
+        let mut figure = rich_image_figure_html(media_url, &caption);
+        if rich_message_exceeds_limit(&figure) {
+            figure = rich_image_figure_html(
+                media_url,
+                &compact_file_metadata_caption(file, preferences),
+            );
+        }
+        let separator = if html.is_empty() { "" } else { "\n" };
+        let candidate = format!("{html}{separator}{figure}");
+        if rich_message_exceeds_limit(&candidate) {
+            break;
+        }
+        html = candidate;
+    }
+    html
+}
+
+/// Formats one Telegram rich-message figure block.
+fn rich_image_figure_html(media_url: &str, caption: &str) -> String {
+    format!(
+        "<figure><img src=\"{}\"/><figcaption>{}</figcaption></figure>",
+        escape_attr(media_url),
+        caption.replace('\n', "<br>")
+    )
+}
+
+/// Returns true when rich message source should not be sent to Telegram.
+fn rich_message_exceeds_limit(html: &str) -> bool {
+    html.chars().count() > TELEGRAM_RICH_MESSAGE_LIMIT_CHARS
 }
 
 /// Lists Telegram-safe preview URLs from safest rendered thumbnail to original fallback.
@@ -709,6 +748,11 @@ fn pagination_row(
 
 /// Formats file metadata as an HTML caption/message.
 pub fn format_file_metadata(file: &FileHit, preferences: &Preferences) -> String {
+    format_file_metadata_lines(file, preferences).join("\n")
+}
+
+/// Builds file metadata lines before they are joined for Telegram.
+fn format_file_metadata_lines(file: &FileHit, preferences: &Preferences) -> Vec<String> {
     let mut lines = Vec::new();
     if let Some(url) = &file.description_url {
         lines.push(format!(
@@ -808,7 +852,7 @@ pub fn format_file_metadata(file: &FileHit, preferences: &Preferences) -> String
     if let Some(url) = file.history_url() {
         lines.push(format!("<a href=\"{}\">History</a>", escape_attr(&url)));
     }
-    lines.join("\n")
+    lines
 }
 
 /// Formats preview metadata compactly enough for Telegram photo captions.
@@ -932,6 +976,9 @@ fn compact_title_line(file: &FileHit) -> String {
 
 /// Drops low-priority lines until the compact caption fits Telegram.
 fn compact_caption_fit(mut lines: Vec<String>, file: &FileHit) -> String {
+    if let Some(caption) = drop_low_priority_metadata_lines_until_fit(&mut lines) {
+        return caption;
+    }
     while lines.len() > 1 {
         let caption = lines.join("\n");
         if !caption_exceeds_photo_limit(&caption) {
@@ -944,6 +991,63 @@ fn compact_caption_fit(mut lines: Vec<String>, file: &FileHit) -> String {
         return caption;
     }
     file_link(file).unwrap_or_else(|| escape_text(&truncate_visible_text(&file.file_name, 120)))
+}
+
+/// Drops user-approved low-priority metadata rows in a stable order.
+fn drop_low_priority_metadata_lines_until_fit(lines: &mut Vec<String>) -> Option<String> {
+    let caption = lines.join("\n");
+    if !caption_exceeds_photo_limit(&caption) {
+        return Some(caption);
+    }
+    for matcher in LOW_PRIORITY_PHOTO_CAPTION_LINES {
+        remove_first_caption_line_matching(lines, matcher);
+        let caption = lines.join("\n");
+        if !caption_exceeds_photo_limit(&caption) {
+            return Some(caption);
+        }
+    }
+    None
+}
+
+/// Removes the first caption row that matches the given predicate.
+fn remove_first_caption_line_matching(lines: &mut Vec<String>, matcher: fn(&str) -> bool) {
+    if let Some(index) = lines.iter().position(|line| matcher(line)) {
+        lines.remove(index);
+    }
+}
+
+/// Rows that are removed first when Telegram photo captions are too long.
+const LOW_PRIORITY_PHOTO_CAPTION_LINES: [fn(&str) -> bool; 5] = [
+    is_f_number_line,
+    is_iso_speed_line,
+    is_lens_focal_length_line,
+    is_exposure_time_line,
+    is_history_line,
+];
+
+/// Returns true for the F-number EXIF row.
+fn is_f_number_line(line: &str) -> bool {
+    line.contains(">F-number</a>:") || line.starts_with("F-number:")
+}
+
+/// Returns true for the ISO speed EXIF row.
+fn is_iso_speed_line(line: &str) -> bool {
+    line.contains(">ISO speed rating</a>:") || line.starts_with("ISO speed rating:")
+}
+
+/// Returns true for the focal length EXIF row.
+fn is_lens_focal_length_line(line: &str) -> bool {
+    line.contains(">Lens focal length</a>:") || line.starts_with("Lens focal length:")
+}
+
+/// Returns true for the exposure-time EXIF row.
+fn is_exposure_time_line(line: &str) -> bool {
+    line.contains(">Exposure time</a>:") || line.starts_with("Exposure time:")
+}
+
+/// Returns true for the file-history link row.
+fn is_history_line(line: &str) -> bool {
+    line.contains(">History</a>") || line == "History"
 }
 
 /// Collapses whitespace and truncates visible text without cutting HTML markup.
@@ -1262,9 +1366,9 @@ pub fn human_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Update, category_buttons_page, file_buttons, file_buttons_page, format_file_metadata,
-        human_bytes, inline_result, paginated_title, short_inline_text, telegram_photo_caption,
-        telegram_preview_url,
+        Update, category_buttons_page, drop_low_priority_metadata_lines_until_fit, file_buttons,
+        file_buttons_page, format_file_metadata, human_bytes, inline_result, paginated_title,
+        rich_image_preview_html, short_inline_text, telegram_photo_caption, telegram_preview_url,
     };
     use crate::models::{CategoryHit, FileHit, Preferences};
 
@@ -1531,6 +1635,122 @@ mod tests {
             caption,
             "<a href=\"https://commons.wikimedia.org/wiki/File:A.jpg\">A.jpg</a>"
         );
+    }
+
+    #[test]
+    fn photo_caption_pruning_drops_only_first_needed_low_priority_line() {
+        let mut lines = caption_lines_needing_removed_indexes(&[1]);
+
+        let caption = drop_low_priority_metadata_lines_until_fit(&mut lines).unwrap();
+
+        assert!(!caption.contains("F-number"));
+        assert!(caption.contains("ISO speed rating"));
+        assert!(caption.contains("Lens focal length"));
+        assert!(caption.contains("Exposure time"));
+        assert!(caption.contains("History"));
+        assert!(caption.chars().count() <= super::TELEGRAM_PHOTO_CAPTION_LIMIT_CHARS);
+    }
+
+    #[test]
+    fn photo_caption_pruning_continues_until_history_when_needed() {
+        let mut lines = caption_lines_needing_removed_indexes(&[1, 2, 3, 4, 5]);
+
+        let caption = drop_low_priority_metadata_lines_until_fit(&mut lines).unwrap();
+
+        assert!(!caption.contains("F-number"));
+        assert!(!caption.contains("ISO speed rating"));
+        assert!(!caption.contains("Lens focal length"));
+        assert!(!caption.contains("Exposure time"));
+        assert!(!caption.contains("History"));
+        assert!(caption.chars().count() <= super::TELEGRAM_PHOTO_CAPTION_LIMIT_CHARS);
+    }
+
+    #[test]
+    fn rich_preview_html_keeps_metadata_with_each_image() {
+        let file = FileHit {
+            file_name: "A.jpg".into(),
+            description_url: Some("https://commons.wikimedia.org/wiki/File:A.jpg".into()),
+            thumb_url: Some("https://upload.wikimedia.org/thumb/a.jpg".into()),
+            mime: Some("image/jpeg".into()),
+            caption_text: Some("Useful caption".into()),
+            uploader: Some("Example".into()),
+            ..FileHit::default()
+        };
+
+        let html = rich_image_preview_html(&[&file], &Preferences::default());
+
+        assert!(html.contains("<figure><img src=\"https://upload.wikimedia.org/thumb/a.jpg\"/>"));
+        assert!(html.contains("<figcaption>"));
+        assert!(html.contains("Caption: Useful caption"));
+        assert!(html.contains("Uploader:"));
+        assert!(html.contains("<br>"));
+    }
+
+    #[test]
+    fn rich_preview_html_respects_telegram_limit() {
+        let file = FileHit {
+            file_name: "A.jpg".into(),
+            description_url: Some("https://commons.wikimedia.org/wiki/File:A.jpg".into()),
+            thumb_url: Some("https://upload.wikimedia.org/thumb/a.jpg".into()),
+            mime: Some("image/jpeg".into()),
+            description_text: Some("Long description ".repeat(10_000)),
+            ..FileHit::default()
+        };
+
+        let html = rich_image_preview_html(&[&file], &Preferences::default());
+
+        assert!(html.chars().count() <= super::TELEGRAM_RICH_MESSAGE_LIMIT_CHARS);
+        assert!(html.contains("A.jpg"));
+    }
+
+    #[test]
+    fn rich_preview_html_can_disable_metadata() {
+        let preferences = Preferences {
+            show_preview_metadata: false,
+            rich_image_previews: true,
+            ..Preferences::default()
+        };
+        let file = FileHit {
+            file_name: "A.jpg".into(),
+            description_url: Some("https://commons.wikimedia.org/wiki/File:A.jpg".into()),
+            thumb_url: Some("https://upload.wikimedia.org/thumb/a.jpg".into()),
+            mime: Some("image/jpeg".into()),
+            uploader: Some("Example".into()),
+            ..FileHit::default()
+        };
+
+        let html = rich_image_preview_html(&[&file], &preferences);
+
+        assert!(
+            html.contains("<a href=\"https://commons.wikimedia.org/wiki/File:A.jpg\">A.jpg</a>")
+        );
+        assert!(!html.contains("Uploader:"));
+    }
+
+    fn caption_lines_needing_removed_indexes(removed_indexes: &[usize]) -> Vec<String> {
+        let mut lines = base_priority_caption_lines();
+        let base_after_removal = lines
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !removed_indexes.contains(index))
+            .map(|(_, line)| line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let filler =
+            super::TELEGRAM_PHOTO_CAPTION_LIMIT_CHARS - base_after_removal.chars().count() - 1;
+        lines.push("x".repeat(filler));
+        lines
+    }
+
+    fn base_priority_caption_lines() -> Vec<String> {
+        vec![
+            "<b>A.jpg</b>".into(),
+            "F-number: f/7".into(),
+            "ISO speed rating: 400".into(),
+            "Lens focal length: 11 mm".into(),
+            "Exposure time: 10/850 sec".into(),
+            "History".into(),
+        ]
     }
 
     #[test]
